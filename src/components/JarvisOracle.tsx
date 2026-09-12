@@ -12,7 +12,7 @@ import {
   verifyGeminiApiKey,
 } from "@/lib/chat";
 import { gestureEvents } from "@/lib/gestureEvents";
-import { saveUserQuestion } from "@/services/questionsService";
+import { saveUserQuestion, updateUserQuestionReply } from "@/services/questionsService";
 import { jarvisAudio } from "@/lib/jarvisAudio";
 import { JarvisHologramCore } from "./JarvisHologramCore";
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -644,6 +644,23 @@ export function JarvisOracle({
     setIsStreaming(true);
     setActiveSubtitle("Processing query through neural telemetry...");
 
+    // Immediately persist user question to Supabase so it appears in Table Editor right away
+    let questionDbId: string | undefined;
+    saveUserQuestion({
+      question: trimmed,
+      reply: null,
+      context: {
+        source: "jarvis_oracle",
+        selectedNode: selectedNode ? { id: selectedNode.id, label: selectedNode.label } : null,
+        activeStep,
+        totalNodes: graph.nodes.length,
+      },
+    }).then(res => {
+      if (res?.data?.id) {
+        questionDbId = res.data.id;
+      }
+    });
+
     try {
       const chatHistory = messages
         .slice(-6)
@@ -707,17 +724,21 @@ export function JarvisOracle({
 
       jarvisAudio.playChime();
 
-      // Persist to Supabase in background
-      saveUserQuestion({
-        question: trimmed,
-        reply: finalReply,
-        context: {
-          source: "jarvis_oracle",
-          selectedNode: selectedNode ? { id: selectedNode.id, label: selectedNode.label } : null,
-          activeStep,
-          totalNodes: graph.nodes.length,
-        },
-      });
+      // Persist AI reply to Supabase record
+      if (questionDbId) {
+        updateUserQuestionReply(questionDbId, finalReply);
+      } else {
+        saveUserQuestion({
+          question: trimmed,
+          reply: finalReply,
+          context: {
+            source: "jarvis_oracle",
+            selectedNode: selectedNode ? { id: selectedNode.id, label: selectedNode.label } : null,
+            activeStep,
+            totalNodes: graph.nodes.length,
+          },
+        });
+      }
 
       // Automatically execute actions
       if (actions.length > 0) {
@@ -747,11 +768,9 @@ export function JarvisOracle({
       );
       speakWithSynchronizedText(errText);
 
-      saveUserQuestion({
-        question: trimmed,
-        reply: null,
-        context: { source: "jarvis_oracle", error: err instanceof Error ? err.message : "Error" },
-      });
+      if (questionDbId) {
+        updateUserQuestionReply(questionDbId, errText);
+      }
     } finally {
       setLoading(false);
       setIsStreaming(false);

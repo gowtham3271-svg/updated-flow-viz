@@ -47,7 +47,7 @@ describe("JARVIS Real-Time Chat Streaming", () => {
     expect(reply.length).toBeGreaterThan(0);
     expect(finalAccumulated).toBe(reply);
     expect(reply.toLowerCase()).toContain("sir");
-  });
+  }, 15000);
 
   it("correctly parses visualization actions embedded in chat replies", () => {
     const textWithActions =

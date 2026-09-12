@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Sparkles, Trash2, User, Bot, AlertCircle, RotateCcw, Square, Terminal } from "lucide-react";
 import type { FlowGraph, FlowNode, FlowEdge, CodeFile } from "@/types";
 import { sendChatStream, parseActionsFromText, type ParsedAction } from "@/lib/chat";
-import { saveUserQuestion } from "@/services/questionsService";
+import { saveUserQuestion, updateUserQuestionReply } from "@/services/questionsService";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
 interface ChatPanelProps {
@@ -193,6 +193,23 @@ export function ChatPanel({
     setIsStreaming(true);
     setError(null);
 
+    // Immediately persist user question to Supabase so it appears in Table Editor right away
+    let questionDbId: string | undefined;
+    saveUserQuestion({
+      question: trimmed,
+      reply: null,
+      context: {
+        selectedNode: selectedNode ? { id: selectedNode.id, label: selectedNode.label, kind: selectedNode.kind } : null,
+        activeStep: activeStep ? { label: activeStep.label, from: activeStep.from, to: activeStep.to } : null,
+        totalFiles: files.length,
+        totalNodes: graph.nodes.length,
+      },
+    }).then(res => {
+      if (res?.data?.id) {
+        questionDbId = res.data.id;
+      }
+    });
+
     try {
       let accumulatedReply = "";
       const fullReply = await sendChatStream(
@@ -242,16 +259,20 @@ export function ChatPanel({
       });
 
       // Persist user question and AI reply to Supabase database in background
-      saveUserQuestion({
-        question: trimmed,
-        reply: finalReply,
-        context: {
-          selectedNode: selectedNode ? { id: selectedNode.id, label: selectedNode.label, kind: selectedNode.kind } : null,
-          activeStep: activeStep ? { label: activeStep.label, from: activeStep.from, to: activeStep.to } : null,
-          totalFiles: files.length,
-          totalNodes: graph.nodes.length,
-        },
-      });
+      if (questionDbId) {
+        updateUserQuestionReply(questionDbId, finalReply);
+      } else {
+        saveUserQuestion({
+          question: trimmed,
+          reply: finalReply,
+          context: {
+            selectedNode: selectedNode ? { id: selectedNode.id, label: selectedNode.label, kind: selectedNode.kind } : null,
+            activeStep: activeStep ? { label: activeStep.label, from: activeStep.from, to: activeStep.to } : null,
+            totalFiles: files.length,
+            totalNodes: graph.nodes.length,
+          },
+        });
+      }
 
       // Trigger actions automatically
       if (actions.length > 0) {
@@ -272,11 +293,9 @@ export function ChatPanel({
         return updated;
       });
 
-      saveUserQuestion({
-        question: trimmed,
-        reply: null,
-        context: { error: err instanceof Error ? err.message : "Request failed" },
-      });
+      if (questionDbId) {
+        updateUserQuestionReply(questionDbId, userFriendlyError);
+      }
     } finally {
       setLoading(false);
       setIsStreaming(false);
