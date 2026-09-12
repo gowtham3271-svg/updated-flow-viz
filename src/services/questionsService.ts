@@ -26,7 +26,14 @@ export async function saveUserQuestion(
       return { success: false, error: "Empty question" };
     }
 
+    const questionId =
+      record.id ||
+      (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : undefined);
+
     const payload = {
+      ...(questionId ? { id: questionId } : {}),
       question: trimmedQuestion,
       reply: record.reply ?? null,
       context: record.context ?? {},
@@ -45,13 +52,13 @@ export async function saveUserQuestion(
           language: record.language || "en",
           sources: record.sources || [],
         })
-        .select()
-        .single();
+        .select();
 
-      if (!error && data) {
-        savedData = data as UserQuestionRecord;
+      if (!error && data && data.length > 0) {
+        savedData = data[0] as UserQuestionRecord;
       } else if (error) {
         savedError = error.message;
+        console.warn("[Supabase flow_viz] insert notice:", error.message);
       }
     } catch (e) {
       savedError = e instanceof Error ? e.message : "flow_viz error";
@@ -63,20 +70,21 @@ export async function saveUserQuestion(
         .schema("public")
         .from("user_questions")
         .insert(payload)
-        .select()
-        .single();
+        .select();
 
-      if (!savedData && !error && data) {
-        savedData = data as UserQuestionRecord;
+      if (!savedData && !error && data && data.length > 0) {
+        savedData = data[0] as UserQuestionRecord;
       }
-    } catch {
-      // Ignore fallback schema error if flow_viz succeeded
+    } catch (err) {
+      console.warn("[Supabase public] fallback notice:", err);
     }
 
     if (savedData) {
+      console.info("[Supabase] Question stored successfully:", savedData.id, trimmedQuestion);
       return { success: true, data: savedData };
     }
 
+    console.warn("[Supabase] Could not persist question:", savedError);
     return { success: false, error: savedError || "Failed to persist to Supabase" };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Failed to store question";
