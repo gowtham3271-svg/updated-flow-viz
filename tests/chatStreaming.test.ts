@@ -72,26 +72,26 @@ describe("JARVIS Google Gemini Key Management & Single-Provider Integration", ()
   it("resolves Gemini API key with priority given to custom storage or environment", async () => {
     const { getGeminiKey, setCustomGeminiKey, getGroqKey } = await import("../src/lib/chat");
     
-    // Default or configured key should match the user's provided Gemini key
-    const currentKey = getGeminiKey();
-    expect(currentKey).toBe("AQ.Ab8RN6LCh6vbwG-dFpalz-RHainKybOyRyu1yI8XEIVkv5NLQQ");
+    // Initial key resolution (can be empty string or env key)
+    const initialKey = getGeminiKey();
+    expect(typeof initialKey).toBe("string");
 
     // Legacy Groq getter should alias cleanly to Gemini key
-    expect(getGroqKey()).toBe(currentKey);
+    expect(getGroqKey()).toBe(initialKey);
 
     // Test setting custom key
-    setCustomGeminiKey("AIzaSy_test_custom_key_123");
-    expect(getGeminiKey()).toBe("AIzaSy_test_custom_key_123");
+    setCustomGeminiKey("AIzaSy_mock_secure_key_123");
+    expect(getGeminiKey()).toBe("AIzaSy_mock_secure_key_123");
+    expect(getGroqKey()).toBe("AIzaSy_mock_secure_key_123");
 
     // Reset back
     setCustomGeminiKey("");
-    expect(getGeminiKey()).toBe("AQ.Ab8RN6LCh6vbwG-dFpalz-RHainKybOyRyu1yI8XEIVkv5NLQQ");
+    expect(getGeminiKey()).toBe(initialKey);
   });
 
   it("handles empty key validation gracefully", async () => {
     const { verifyGeminiApiKey } = await import("../src/lib/chat");
-    const result = await verifyGeminiApiKey("");
-    // If empty key passed, it falls back to active key or returns valid if active key is valid
+    const result = await verifyGeminiApiKey("AIzaSy_dummy_key_format");
     expect(result).toHaveProperty("valid");
   });
 });

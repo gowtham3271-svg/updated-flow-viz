@@ -165,6 +165,8 @@ export function JarvisOracle({
     const currentKey = getGeminiKey();
     if (!currentKey) {
       setApiKeyError("Gemini API key not configured");
+    } else {
+      setApiKeyError(null);
     }
 
     const handleInvalidKey = (e: Event) => {
@@ -1626,16 +1628,16 @@ export function JarvisOracle({
 
             <div className="text-xs text-slate-300 space-y-2.5">
               <p>
-                J.A.R.V.I.S. neural cortex is powered by <strong>Google Gemini (Gemini 3.5 Flash / Pro)</strong> for real-time code analysis, terminal command synthesis, and synchronized HUD speech.
+                J.A.R.V.I.S. neural cortex is powered by <strong>Google Gemini Pro (Gemini 2.5 Pro / Flash)</strong> for real-time code analysis, terminal command synthesis, and synchronized HUD speech.
               </p>
               
               <div className="p-3 rounded-xl bg-cyan-950/40 border border-cyan-500/40 flex items-center justify-between">
                 <div>
                   <div className="text-cyan-300 font-bold text-xs flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
-                    Google Gemini 3.5 Flash Neural Engine
+                    Google Gemini Pro Neural Engine
                   </div>
-                  <div className="text-[10px] text-slate-400 mt-0.5">Ultra-low latency SSE streaming • Live voice synchronization</div>
+                  <div className="text-[10px] text-slate-400 mt-0.5">Gemini 2.5 Pro Tier • 1M Token Context • Low Latency SSE</div>
                 </div>
                 <a
                   href="https://aistudio.google.com/app/apikey"
