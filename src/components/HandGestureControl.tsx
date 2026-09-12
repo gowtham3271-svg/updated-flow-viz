@@ -1,6 +1,11 @@
 import { useRef, useEffect, useState, useCallback } from "react";
-import { CameraOff, Loader2, Zap, Gauge } from "lucide-react";
+import { CameraOff, Loader2, Zap, Gauge, Eye, EyeOff, ShieldAlert, Sparkles } from "lucide-react";
 import { gestureEvents } from "@/lib/gestureEvents";
+import type { HandLandmark, GestureTelemetry, GestureType } from "@/lib/gestures/types";
+import { GESTURE_CONFIGS } from "@/lib/gestures/types";
+import { GestureClassifier } from "@/lib/gestures/classifier";
+import { GestureStabilizer } from "@/lib/gestures/stabilizer";
+import { HolographicRenderer } from "@/lib/gestures/holographicRenderer";
 
 interface HandGestureControlProps {
   enabled: boolean;
@@ -9,21 +14,19 @@ interface HandGestureControlProps {
   onZoom?: (delta: number) => void;
   onResetView?: () => void;
   onNodeClickAt?: (screenX: number, screenY: number) => void;
+  onAction?: (action: string) => void;
 }
 
-type HandLandmark = { x: number; y: number; z: number };
+interface MediaPipeHands {
+  setOptions: (opts: Record<string, unknown>) => void;
+  onResults: (cb: (res: { multiHandLandmarks?: HandLandmark[][] }) => void) => void;
+  send: (input: { image: HTMLCanvasElement | HTMLVideoElement }) => Promise<void>;
+  close: () => void;
+}
 
-const DEFAULT_HOLD_TIME = 250;
-const FAST_HOLD_TIME = 140;
-
-// Gesture colors
-const GESTURE_COLORS = {
-  open_palm: { primary: "#00d4ff", secondary: "rgba(0,212,255,0.4)", name: "ROTATE" },
-  pinch:     { primary: "#fbbf24", secondary: "rgba(251,191,36,0.4)",  name: "ZOOM"   },
-  point:     { primary: "#f472b6", secondary: "rgba(244,114,182,0.4)", name: "SELECT" },
-  peace:     { primary: "#10b981", secondary: "rgba(16,185,129,0.4)",  name: "JARVIS" },
-  default:   { primary: "#38bdf8", secondary: "rgba(56,189,248,0.3)",  name: "TRACK"  },
-};
+interface WindowWithHands extends Window {
+  Hands?: new (config: { locateFile: (f: string) => string }) => MediaPipeHands;
+}
 
 export function HandGestureControl({
   enabled,
@@ -32,492 +35,763 @@ export function HandGestureControl({
   onZoom,
   onResetView,
   onNodeClickAt,
+  onAction,
 }: HandGestureControlProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const reticleRef = useRef<HTMLDivElement>(null);
   const circleProgressRef = useRef<SVGCircleElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const handsRef = useRef<any>(null);
+  const handsRef = useRef<MediaPipeHands | null>(null);
   const rafRef = useRef<number | null>(null);
-  const procCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const procCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const vfcRef = useRef<number | null>(null);
 
-  // Tracking refs
-  const lastHandPos = useRef<{ x: number; y: number } | null>(null);
-  const pinchStartDist = useRef<number | null>(null);
-  const pointHoldStart = useRef<number | null>(null);
-  const twoHandsStart = useRef<number | null>(null);
-  const peaceHoldStart = useRef<number | null>(null);
+  // Gesture Engine instances
+  const classifierRef = useRef<GestureClassifier>(new GestureClassifier());
+  const stabilizerRef = useRef<GestureStabilizer>(new GestureStabilizer());
+  const rendererRef = useRef<HolographicRenderer>(new HolographicRenderer());
+
+  // Interactive configurations preserved in refs to avoid camera teardowns!
+  const sensitivityRef = useRef<number>(1.8);
+  const turboModeRef = useRef<boolean>(true);
+  const dualHandModeRef = useRef<boolean>(false);
   const isProcessingFrame = useRef<boolean>(false);
-  const lastGestureRef = useRef<string>("default");
-  const prevLandmarks = useRef<HandLandmark[] | null>(null);
 
-  const [turboMode, setTurboMode] = useState(true);
-  const [sensitivity, setSensitivity] = useState(1.8);
+  // Tracking state refs for continuous gestures
+  const lastPalmPos = useRef<{ x: number; y: number } | null>(null);
+  const lastPinchDist = useRef<number | null>(null);
+  const pointDwellStart = useRef<number | null>(null);
+
+  // High-level UI state
   const [status, setStatus] = useState<"idle" | "loading" | "active" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [handDetected, setHandDetected] = useState(false);
-  const [currentGesture, setCurrentGesture] = useState("default");
-  const [fps, setFps] = useState(0);
+  const [isMinimized, setIsMinimized] = useState<boolean>(false);
+  const [turboMode, setTurboMode] = useState<boolean>(true);
+  const [dualHandMode, setDualHandMode] = useState<boolean>(false);
+  const [sensitivity, setSensitivity] = useState<number>(1.8);
+
+  // Telemetry state throttled for display
+  const [telemetry, setTelemetry] = useState<GestureTelemetry>({
+    state: "IDLE",
+    detectedGesture: "none",
+    confirmedGesture: null,
+    confidence: 0,
+    stabilityProgress: 0,
+    fps: 0,
+    handCount: 0,
+    actionText: "SYSTEM INITIALIZING",
+  });
+
+  const lastTelemetryRef = useRef<GestureTelemetry>({
+    state: "IDLE",
+    detectedGesture: "none",
+    confirmedGesture: null,
+    confidence: 0,
+    stabilityProgress: 0,
+    fps: 0,
+    handCount: 0,
+    actionText: "SYSTEM INITIALIZING",
+  });
+
   const frameCountRef = useRef(0);
   const lastFpsTimeRef = useRef(performance.now());
+  const currentFpsRef = useRef(0);
+  const lastTelemetryUpdateRef = useRef(0);
 
+  // Cleanup camera stream, RAF, VFC, and MediaPipe instances
   const cleanup = useCallback(() => {
-    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
-    handsRef.current = null;
-    lastHandPos.current = null;
-    pinchStartDist.current = null;
-    pointHoldStart.current = null;
-    twoHandsStart.current = null;
-    peaceHoldStart.current = null;
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    if (videoRef.current && "cancelVideoFrameCallback" in videoRef.current && vfcRef.current !== null) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (videoRef.current as any).cancelVideoFrameCallback(vfcRef.current);
+      vfcRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    if (handsRef.current) {
+      try {
+        handsRef.current.close();
+      } catch {
+        /* no-op */
+      }
+      handsRef.current = null;
+    }
+
+    stabilizerRef.current.reset();
+    classifierRef.current.resetVelocityHistory();
+    lastPalmPos.current = null;
+    lastPinchDist.current = null;
+    pointDwellStart.current = null;
     isProcessingFrame.current = false;
-    prevLandmarks.current = null;
+
     setStatus("idle");
-    setHandDetected(false);
-    setCurrentGesture("default");
     if (reticleRef.current) reticleRef.current.style.display = "none";
   }, []);
 
+  // Update refs when settings change without killing the camera!
   useEffect(() => {
-    if (!enabled) { cleanup(); return; }
+    sensitivityRef.current = sensitivity;
+  }, [sensitivity]);
+
+  useEffect(() => {
+    turboModeRef.current = turboMode;
+    stabilizerRef.current.setStabilityThreshold(turboMode ? 130 : 220);
+  }, [turboMode]);
+
+  useEffect(() => {
+    dualHandModeRef.current = dualHandMode;
+    if (handsRef.current) {
+      handsRef.current.setOptions({
+        maxNumHands: dualHandMode ? 2 : 1,
+      });
+    }
+  }, [dualHandMode]);
+
+  // Main Camera & Hand-Tracking Lifecycle
+  useEffect(() => {
+    if (!enabled) {
+      cleanup();
+      return;
+    }
+
     let cancelled = false;
     setStatus("loading");
 
-    if (!procCanvasRef.current) {
-      procCanvasRef.current = document.createElement("canvas");
-      procCanvasRef.current.width = 320;
-      procCanvasRef.current.height = 240;
-      procCtxRef.current = procCanvasRef.current.getContext("2d", { willReadFrequently: true });
-    }
-
-    const init = async () => {
+    const initTracking = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 }, facingMode: "user" },
+          video: {
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            frameRate: { ideal: 30, max: 60 },
+            facingMode: "user",
+          },
           audio: false,
         });
-        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
-        streamRef.current = stream;
-        if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
 
-        if (!(window as any).Hands) {
-          const s = document.createElement("script");
-          s.src = "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js";
-          s.crossOrigin = "anonymous";
-          document.head.appendChild(s);
-          await new Promise<void>((res, rej) => { s.onload = () => res(); s.onerror = () => rej(new Error("MediaPipe load failed")); });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
         }
+
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+
+        // Dynamically load MediaPipe Hands library once
+        const win = window as unknown as WindowWithHands;
+        if (!win.Hands) {
+          const script = document.createElement("script");
+          script.src = "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js";
+          script.crossOrigin = "anonymous";
+          document.head.appendChild(script);
+          await new Promise<void>((resolve, reject) => {
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error("Failed to load J.A.R.V.I.S. vision model"));
+          });
+        }
+
         if (cancelled) return;
 
-        const HandsCtor = (window as any).Hands;
-        const hands = new HandsCtor({ locateFile: (f: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
-        hands.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.4, minTrackingConfidence: 0.4, selfieMode: true });
+        const HandsCtor = win.Hands!;
+        const hands = new HandsCtor({
+          locateFile: (f: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`,
+        });
 
-        hands.onResults((results: any) => {
+        // Configure MediaPipe for ultra-high FPS and steady tracking
+        hands.setOptions({
+          maxNumHands: dualHandModeRef.current ? 2 : 1, // Single hand default delivers up to 2x faster ML inference
+          modelComplexity: 0, // Lite model for ultra-low latency
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+          selfieMode: true,
+        });
+
+        // Process ML results
+        hands.onResults((results: { multiHandLandmarks?: HandLandmark[][] }) => {
           if (cancelled) return;
+
+          // FPS counter
           frameCountRef.current++;
           const now = performance.now();
           if (now - lastFpsTimeRef.current >= 1000) {
-            setFps(Math.round(frameCountRef.current * 1000 / (now - lastFpsTimeRef.current)));
+            currentFpsRef.current = Math.round((frameCountRef.current * 1000) / (now - lastFpsTimeRef.current));
             frameCountRef.current = 0;
             lastFpsTimeRef.current = now;
           }
 
-          const canvas = canvasRef.current;
-          const ctx = canvas?.getContext("2d");
           const handsList = results.multiHandLandmarks ?? [];
-          setHandDetected(handsList.length > 0);
+          const handCount = handsList.length;
 
-          if (canvas && ctx) {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            // Draw camera frame slightly dimmed
-            if (videoRef.current && videoRef.current.readyState >= 2) {
-              ctx.globalAlpha = 0.35;
-              ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-              ctx.globalAlpha = 1;
-            }
+          // Classify gesture
+          let rawGesture = {
+            type: "none" as GestureType,
+            confidence: 0,
+            name: GESTURE_CONFIGS.none.name,
+            actionText: GESTURE_CONFIGS.none.action,
+            isContinuous: false,
+          };
 
-            if (handsList.length > 0) {
-              const gesture = handsList.length === 2 ? "two_hands" : detectGesture3D(handsList[0]).name;
-              const gColor = GESTURE_COLORS[gesture as keyof typeof GESTURE_COLORS] ?? GESTURE_COLORS.default;
-              for (const landmarks of handsList) {
-                drawGlowingSkeleton(ctx, landmarks, canvas.width, canvas.height, gColor.primary, gColor.secondary);
-              }
-              // Ghost trail from previous frame
-              if (prevLandmarks.current && handsList.length === 1) {
-                drawGhostTrail(ctx, prevLandmarks.current, canvas.width, canvas.height, gColor.primary);
-              }
-              prevLandmarks.current = handsList.length === 1 ? [...handsList[0]] : null;
-            } else {
-              prevLandmarks.current = null;
+          if (handCount === 1) {
+            rawGesture = classifierRef.current.detectGesture(handsList[0], now);
+          } else if (handCount >= 2) {
+            rawGesture = {
+              type: "two_hands",
+              confidence: 0.98,
+              name: GESTURE_CONFIGS.two_hands.name,
+              actionText: GESTURE_CONFIGS.two_hands.action,
+              isContinuous: false,
+            };
+          }
+
+          // State Machine & Stabilization
+          const {
+            telemetry: currentTelemetry,
+            shouldTriggerDiscreteAction,
+            actionToTrigger,
+          } = stabilizerRef.current.update(rawGesture, handCount, currentFpsRef.current, now);
+
+          // Throttled UI state updates: compare against ref to fix the stale closure bug!
+          const prev = lastTelemetryRef.current;
+          const stateChanged = currentTelemetry.state !== prev.state;
+          const gestureChanged = currentTelemetry.detectedGesture !== prev.detectedGesture;
+          const timeElapsed = now - lastTelemetryUpdateRef.current >= 80;
+
+          if (stateChanged || gestureChanged || timeElapsed) {
+            lastTelemetryRef.current = currentTelemetry;
+            lastTelemetryUpdateRef.current = now;
+            setTelemetry(currentTelemetry);
+          }
+
+          // Render Holographic 2D Visualizer
+          const canvas = canvasRef.current;
+          if (canvas) {
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+              rendererRef.current.draw(ctx, videoRef.current, handsList, currentTelemetry, canvas.width, canvas.height);
             }
           }
 
-          // 2 Hands Gesture: Reset
-          if (handsList.length === 2) {
-            updateGestureText("two_hands");
-            hideReticle();
-            if (!twoHandsStart.current) twoHandsStart.current = performance.now();
-            else if (performance.now() - twoHandsStart.current > 400) {
-              onResetView?.(); gestureEvents.emit("reset", true); twoHandsStart.current = null;
-            }
-            lastHandPos.current = null; pinchStartDist.current = null; pointHoldStart.current = null; peaceHoldStart.current = null;
-            return;
-          } else { twoHandsStart.current = null; }
+          // Handle Discrete Commands (Executed once upon confirmation!)
+          if (shouldTriggerDiscreteAction && actionToTrigger) {
+            executeDiscreteCommand(actionToTrigger);
+          }
 
-          if (handsList.length === 1) {
-            const landmarks = handsList[0] as HandLandmark[];
-            const gesture = detectGesture3D(landmarks);
-            updateGestureText(gesture.name || "default");
-
-            const holdThreshold = turboMode ? FAST_HOLD_TIME : DEFAULT_HOLD_TIME;
-            const multiplier = sensitivity * (turboMode ? 1.5 : 1.0);
-
-            if (gesture.name === "pinch") {
-              const thumb = landmarks[4], index = landmarks[8];
-              const currentDist = Math.hypot(thumb.x - index.x, thumb.y - index.y);
-              if (pinchStartDist.current !== null) {
-                const delta = (pinchStartDist.current - currentDist) * 35 * multiplier;
-                onZoom?.(delta); gestureEvents.emit("zoom", { delta });
-              }
-              pinchStartDist.current = currentDist;
-              lastHandPos.current = null; pointHoldStart.current = null; hideReticle();
-            } else if (gesture.name === "open_palm") {
-              const palmX = landmarks[9].x, palmY = landmarks[9].y;
-              if (lastHandPos.current) {
-                const dx = (palmX - lastHandPos.current.x) * 320 * multiplier;
-                const dy = (palmY - lastHandPos.current.y) * 220 * multiplier;
-                onRotate?.(dx, dy); gestureEvents.emit("rotate", { dx, dy });
-              }
-              lastHandPos.current = { x: palmX, y: palmY };
-              pinchStartDist.current = null; pointHoldStart.current = null; hideReticle();
-            } else if (gesture.name === "point") {
-              const indexTip = landmarks[8];
-              const screenX = indexTip.x * window.innerWidth;
-              const screenY = indexTip.y * window.innerHeight;
-              updateReticlePos(screenX, screenY);
-              if (!pointHoldStart.current) { pointHoldStart.current = performance.now(); updateReticleProgress(0); }
-              else {
-                const elapsed = performance.now() - pointHoldStart.current;
-                const progress = Math.min(elapsed / holdThreshold, 1);
-                updateReticleProgress(progress);
-                if (elapsed >= holdThreshold) {
-                  onNodeClickAt?.(screenX, screenY); gestureEvents.emit("click", { x: screenX, y: screenY });
-                  pointHoldStart.current = null; updateReticleProgress(0);
-                }
-              }
-              lastHandPos.current = null; pinchStartDist.current = null;
-            } else if (gesture.name === "peace") {
-              if (!peaceHoldStart.current) {
-                peaceHoldStart.current = performance.now();
-              } else if (performance.now() - peaceHoldStart.current > 400) {
-                gestureEvents.emit("peace", true);
-                peaceHoldStart.current = performance.now() + 5000; // prevent trigger again for 5s
-              }
-              lastHandPos.current = null; pinchStartDist.current = null; pointHoldStart.current = null; hideReticle();
-            } else {
-              peaceHoldStart.current = null;
-              lastHandPos.current = null; pinchStartDist.current = null; pointHoldStart.current = null; hideReticle();
-            }
+          // Handle Continuous Gestures (Smoothed with adaptive 1€ Filter)
+          if (handCount === 1) {
+            handleContinuousGestures(rawGesture.type, handsList[0]);
           } else {
-            peaceHoldStart.current = null;
-            lastHandPos.current = null; pinchStartDist.current = null; pointHoldStart.current = null;
-            updateGestureText("default"); hideReticle();
+            resetContinuousTracking();
           }
         });
 
         handsRef.current = hands;
         setStatus("active");
 
+        // Hardware-synced frame processing loop
         const processFrame = async () => {
           if (cancelled) return;
-          if (!isProcessingFrame.current && handsRef.current && videoRef.current && videoRef.current.readyState >= 2) {
+
+          if (
+            !isProcessingFrame.current &&
+            handsRef.current &&
+            videoRef.current &&
+            videoRef.current.readyState >= 2
+          ) {
             isProcessingFrame.current = true;
             try {
-              const pc = procCanvasRef.current, pCtx = procCtxRef.current;
-              if (pc && pCtx) { pCtx.drawImage(videoRef.current, 0, 0, pc.width, pc.height); await handsRef.current.send({ image: pc }); }
-              else await handsRef.current.send({ image: videoRef.current });
-            } catch { /* frame dropped */ } finally { isProcessingFrame.current = false; }
+              // Direct GPU hardware video frame upload into MediaPipe WebGL texture (Zero CPU copy!)
+              await handsRef.current.send({ image: videoRef.current });
+            } catch {
+              // Frame dropped safely
+            } finally {
+              isProcessingFrame.current = false;
+            }
           }
-          rafRef.current = requestAnimationFrame(processFrame);
         };
-        processFrame();
+
+        const scheduleNextFrame = () => {
+          if (cancelled) return;
+          const video = videoRef.current;
+          if (video && "requestVideoFrameCallback" in video) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            vfcRef.current = (video as any).requestVideoFrameCallback(async () => {
+              await processFrame();
+              scheduleNextFrame();
+            });
+          } else {
+            rafRef.current = requestAnimationFrame(async () => {
+              await processFrame();
+              scheduleNextFrame();
+            });
+          }
+        };
+
+        scheduleNextFrame();
       } catch (err) {
         if (cancelled) return;
         setStatus("error");
-        setErrorMsg(err instanceof Error && err.name === "NotAllowedError"
-          ? "Camera permission denied." : "Hand tracking engine failed: " + (err instanceof Error ? err.message : ""));
+        const isPermDenied = err instanceof Error && err.name === "NotAllowedError";
+        setErrorMsg(
+          isPermDenied
+            ? "JARVIS VISION UNAVAILABLE // CAMERA PERMISSION DENIED"
+            : "JARVIS VISION ENGINE OFFLINE // " + (err instanceof Error ? err.message : "CAMERA ERROR")
+        );
       }
     };
 
-    init();
-    return () => { cancelled = true; cleanup(); };
-  }, [enabled, turboMode, sensitivity]);
+    initTracking();
+    return () => {
+      cancelled = true;
+      cleanup();
+    };
+  }, [enabled, cleanup]);
 
+  // Execute Discrete Commands (Debounced & Locked)
+  const executeDiscreteCommand = (action: GestureType) => {
+    const config = GESTURE_CONFIGS[action];
+    gestureEvents.emit("gesture_confirmed", { gesture: config.name, action: config.action });
+
+    switch (action) {
+      case "thumbs_up":
+        onAction?.("run_code");
+        gestureEvents.emit("run_code", true);
+        break;
+
+      case "thumbs_down":
+        onResetView?.();
+        gestureEvents.emit("reset", true);
+        break;
+
+      case "peace":
+        gestureEvents.emit("peace", true);
+        break;
+
+      case "fist":
+        onAction?.("pause_flow");
+        gestureEvents.emit("pause_flow", true);
+        break;
+
+      case "swipe_left":
+        classifierRef.current.resetVelocityHistory();
+        onAction?.("step_back");
+        gestureEvents.emit("step_back", true);
+        break;
+
+      case "swipe_right":
+        classifierRef.current.resetVelocityHistory();
+        onAction?.("step_forward");
+        gestureEvents.emit("step_forward", true);
+        break;
+
+      case "two_hands":
+        onResetView?.();
+        gestureEvents.emit("reset", true);
+        break;
+    }
+  };
+
+  // Handle Continuous Gestures (Rotate, Zoom, Point Dwell with 1€ Filter)
+  const handleContinuousGestures = (gestureType: GestureType, landmarks: HandLandmark[]) => {
+    const multiplier = sensitivityRef.current * (turboModeRef.current ? 1.4 : 1.0);
+    const now = performance.now();
+
+    // 1. OPEN PALM -> Smooth Orbit Rotation (Zero jitter, zero lag)
+    if (gestureType === "open_palm") {
+      const rawPalmX = landmarks[9].x;
+      const rawPalmY = landmarks[9].y;
+      const smooth = stabilizerRef.current.smoothPalm(rawPalmX, rawPalmY, now);
+
+      if (lastPalmPos.current) {
+        const dx = (smooth.x - lastPalmPos.current.x) * 160 * multiplier;
+        const dy = (smooth.y - lastPalmPos.current.y) * 120 * multiplier;
+
+        // Adaptive 1€ Filter eliminates tremor, so 0.15 threshold is crisp and responsive
+        if (Math.abs(dx) > 0.15 || Math.abs(dy) > 0.15) {
+          onRotate?.(dx, dy);
+          gestureEvents.emit("rotate", { dx, dy });
+        }
+      }
+      lastPalmPos.current = { x: smooth.x, y: smooth.y };
+      lastPinchDist.current = null;
+      pointDwellStart.current = null;
+      hideReticle();
+      return;
+    }
+
+    // 2. PINCH -> Smooth Zoom In / Out
+    if (gestureType === "pinch") {
+      const thumb = landmarks[4];
+      const index = landmarks[8];
+      const rawDist = Math.hypot(thumb.x - index.x, thumb.y - index.y);
+      const smoothDist = stabilizerRef.current.smoothPinchDist(rawDist, now);
+
+      if (lastPinchDist.current !== null) {
+        const delta = (lastPinchDist.current - smoothDist) * 22 * multiplier;
+        if (Math.abs(delta) > 0.02) {
+          onZoom?.(delta);
+          gestureEvents.emit("zoom", { delta });
+        }
+      }
+      lastPinchDist.current = smoothDist;
+      lastPalmPos.current = null;
+      pointDwellStart.current = null;
+      hideReticle();
+      return;
+    }
+
+    // 3. POINT -> Laser Reticle & Dwell Click
+    if (gestureType === "point") {
+      const indexTip = landmarks[8];
+      // Invert X for natural mirrored interaction
+      const screenX = (1 - indexTip.x) * window.innerWidth;
+      const screenY = indexTip.y * window.innerHeight;
+
+      const smooth = stabilizerRef.current.smoothPoint(screenX, screenY, now);
+      updateReticlePos(smooth.x, smooth.y);
+
+      const dwellDuration = turboModeRef.current ? 320 : 480;
+      if (!pointDwellStart.current) {
+        pointDwellStart.current = performance.now();
+        updateReticleProgress(0);
+      } else {
+        const elapsed = performance.now() - pointDwellStart.current;
+        const progress = Math.min(elapsed / dwellDuration, 1.0);
+        updateReticleProgress(progress);
+
+        if (progress >= 1.0) {
+          onNodeClickAt?.(smooth.x, smooth.y);
+          gestureEvents.emit("click", { x: smooth.x, y: smooth.y });
+          pointDwellStart.current = performance.now() + 600; // Dwell debounce
+          updateReticleProgress(0);
+        }
+      }
+
+      lastPalmPos.current = null;
+      lastPinchDist.current = null;
+      return;
+    }
+
+    resetContinuousTracking();
+  };
+
+  const resetContinuousTracking = () => {
+    lastPalmPos.current = null;
+    lastPinchDist.current = null;
+    pointDwellStart.current = null;
+    hideReticle();
+  };
+
+  // Precision Reticle Positioning
   const updateReticlePos = (x: number, y: number) => {
     if (reticleRef.current) {
       reticleRef.current.style.display = "flex";
       reticleRef.current.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
     }
   };
-  const hideReticle = () => { if (reticleRef.current) reticleRef.current.style.display = "none"; };
-  const updateReticleProgress = (p: number) => {
-    if (circleProgressRef.current) circleProgressRef.current.style.strokeDashoffset = `${125.6 * (1 - p)}`;
-  };
-  const updateGestureText = (g: string) => {
-    if (g !== lastGestureRef.current) { lastGestureRef.current = g; setCurrentGesture(g); }
+
+  const hideReticle = () => {
+    if (reticleRef.current) reticleRef.current.style.display = "none";
   };
 
-  const gestureInfo = GESTURE_COLORS[currentGesture as keyof typeof GESTURE_COLORS] ?? GESTURE_COLORS.default;
+  const updateReticleProgress = (p: number) => {
+    if (circleProgressRef.current) {
+      circleProgressRef.current.style.strokeDashoffset = `${125.6 * (1 - p)}`;
+    }
+  };
+
+  const activeConfig = GESTURE_CONFIGS[telemetry.detectedGesture] || GESTURE_CONFIGS.none;
 
   return (
     <>
       <video ref={videoRef} className="hidden" playsInline muted />
 
-      {/* Gesture reticle */}
+      {/* Holographic Targeting Reticle */}
       {enabled && (
-        <div ref={reticleRef} className="fixed pointer-events-none z-50 top-0 left-0 hidden items-center justify-center will-change-transform">
-          <div className="w-7 h-7 rounded-full border-2 border-pink-400 bg-pink-500/20 shadow-[0_0_20px_rgba(244,114,182,0.9)] flex items-center justify-center">
-            <div className="w-2 h-2 rounded-full bg-pink-300" />
+        <div
+          ref={reticleRef}
+          className="fixed pointer-events-none z-[260] top-0 left-0 hidden items-center justify-center will-change-transform"
+        >
+          {/* Outer crosshairs */}
+          <div className="absolute w-10 h-10 border border-cyan-400/40 rounded-full animate-spin-slow" />
+          <div className="w-5 h-5 rounded-full border-2 border-cyan-400 bg-cyan-500/20 shadow-[0_0_20px_rgba(0,212,255,0.9)] flex items-center justify-center">
+            <div className="w-1.5 h-1.5 rounded-full bg-cyan-200" />
           </div>
           <svg className="absolute w-12 h-12 -rotate-90">
-            <circle cx="24" cy="24" r="20" stroke="rgba(244,114,182,0.25)" strokeWidth="3" fill="transparent" />
-            <circle ref={circleProgressRef} cx="24" cy="24" r="20" stroke="#f472b6" strokeWidth="3" fill="transparent"
-              strokeDasharray={125.6} strokeDashoffset={125.6} strokeLinecap="round" className="transition-all duration-75" />
+            <circle cx="24" cy="24" r="20" stroke="rgba(0,212,255,0.25)" strokeWidth="2.5" fill="transparent" />
+            <circle
+              ref={circleProgressRef}
+              cx="24"
+              cy="24"
+              r="20"
+              stroke="#00d4ff"
+              strokeWidth="2.5"
+              fill="transparent"
+              strokeDasharray={125.6}
+              strokeDashoffset={125.6}
+              strokeLinecap="round"
+              className="transition-all duration-75"
+            />
           </svg>
         </div>
       )}
 
-      {/* Hand control panel */}
+      {/* Futuristic Tony Stark JARVIS Vision HUD Panel */}
       {enabled && (
-        <div className="absolute bottom-20 left-4 z-30 flex flex-col gap-2 animate-slide-up">
-          {/* Camera + skeleton preview */}
-          <div className="relative rounded-2xl overflow-hidden border border-cyan-500/40 shadow-[0_0_30px_rgba(0,0,0,0.7),0_0_15px_rgba(0,212,255,0.15)] bg-slate-950">
-            <canvas ref={canvasRef} width={200} height={150} className="block" style={{ width: 200, height: 150 }} />
-
-            {/* FPS badge */}
-            <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/70 border border-white/10 text-[10px] font-mono">
-              <span className={`w-1.5 h-1.5 rounded-full ${status === "active" ? "bg-emerald-400 animate-pulse shadow-[0_0_6px_#34d399]" : status === "loading" ? "bg-amber-400 animate-ping" : "bg-red-400"}`} />
-              <span className="text-white">{status === "active" ? `${fps} FPS` : status.toUpperCase()}</span>
+        <div
+          className="fixed bottom-6 left-6 z-[250] flex flex-col gap-2 select-none animate-slide-up"
+          style={{ maxWidth: isMinimized ? 180 : 250 }}
+        >
+          {/* Main Tracking HUD Window */}
+          <div
+            className="relative rounded-2xl overflow-hidden shadow-[0_8px_32px_rgba(0,0,0,0.8),0_0_20px_rgba(0,212,255,0.2)]"
+            style={{
+              background: "linear-gradient(135deg, rgba(2, 10, 26, 0.95) 0%, rgba(1, 6, 18, 0.98) 100%)",
+              border: `1px solid ${activeConfig.primary}44`,
+              backdropFilter: "blur(24px)",
+            }}
+          >
+            {/* Top HUD Header Bar */}
+            <div
+              className="flex items-center justify-between px-3 py-1.5 border-b"
+              style={{
+                borderColor: "rgba(0,212,255,0.15)",
+                background: "rgba(0,212,255,0.04)",
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className="w-2 h-2 rounded-full"
+                  style={{
+                    background: status === "active" ? "#10b981" : status === "loading" ? "#f59e0b" : "#ef4444",
+                    boxShadow: status === "active" ? "0 0 8px #10b981" : "none",
+                  }}
+                />
+                <span className="text-[10px] font-mono font-bold tracking-wider text-cyan-300">
+                  JARVIS VISION
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] font-mono text-slate-400">
+                  {status === "active" ? `${telemetry.fps} FPS` : status.toUpperCase()}
+                </span>
+                <button
+                  onClick={() => setIsMinimized((v) => !v)}
+                  className="p-1 text-slate-400 hover:text-cyan-300 transition-colors"
+                  title={isMinimized ? "Expand HUD" : "Minimize HUD"}
+                >
+                  {isMinimized ? <Eye size={12} /> : <EyeOff size={12} />}
+                </button>
+              </div>
             </div>
 
-            {/* Gesture badge */}
-            {handDetected && (
-              <div className="absolute bottom-2 left-2 right-2">
-                <div
-                  className="flex items-center justify-center gap-1.5 px-2 py-0.5 rounded-lg text-[10px] font-bold font-mono uppercase tracking-wider border"
-                  style={{ color: gestureInfo.primary, borderColor: gestureInfo.secondary, background: `${gestureInfo.secondary}`, textShadow: `0 0 10px ${gestureInfo.primary}` }}
-                >
-                  <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: gestureInfo.primary, boxShadow: `0 0 6px ${gestureInfo.primary}` }} />
-                  {gestureInfo.name}
+            {/* Canvas Hologram Viewport */}
+            {!isMinimized && (
+              <div className="relative">
+                <canvas
+                  ref={canvasRef}
+                  width={250}
+                  height={170}
+                  className="block"
+                  style={{ width: 250, height: 170 }}
+                />
+
+                {/* State Machine HUD Badge */}
+                <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-slate-950/80 border border-cyan-500/30 text-[9px] font-mono text-cyan-200">
+                  <span
+                    className="w-1.5 h-1.5 rounded-full animate-ping"
+                    style={{ background: activeConfig.primary }}
+                  />
+                  <span>{telemetry.state}</span>
                 </div>
+
+                {/* Gesture Confirmation Telemetry Banner */}
+                {telemetry.handCount > 0 && (
+                  <div className="absolute bottom-2 left-2 right-2">
+                    <div
+                      className="flex items-center justify-between px-2.5 py-1 rounded-lg text-[10px] font-mono uppercase tracking-wider border shadow-lg"
+                      style={{
+                        color: activeConfig.primary,
+                        borderColor: activeConfig.secondary,
+                        background: "rgba(2, 12, 32, 0.9)",
+                        boxShadow: `0 0 12px ${activeConfig.secondary}`,
+                      }}
+                    >
+                      <div className="flex items-center gap-1.5 font-bold">
+                        <span
+                          className="w-2 h-2 rounded-full"
+                          style={{
+                            background: activeConfig.primary,
+                            boxShadow: `0 0 8px ${activeConfig.primary}`,
+                          }}
+                        />
+                        <span>{activeConfig.name}</span>
+                      </div>
+                      <span className="text-[9px] font-normal text-slate-300">
+                        {telemetry.actionText}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Scan line effect */}
-            <div className="absolute inset-0 pointer-events-none overflow-hidden rounded-2xl">
-              <div className="absolute left-0 right-0 h-px opacity-30 animate-jarvis-scan" style={{ background: `linear-gradient(90deg, transparent, ${gestureInfo.primary}, transparent)` }} />
-            </div>
-          </div>
-
-          {/* Speed controls */}
-          <div className="glass-panel rounded-xl p-3 text-xs space-y-2.5 max-w-[210px]">
-            <div className="flex items-center justify-between">
-              <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300 uppercase tracking-wider">
-                <Gauge size={11} className="text-cyan-400" /> Speed
-              </span>
-              <button
-                onClick={() => setTurboMode(v => !v)}
-                className={`px-2.5 py-0.5 rounded-lg text-[10px] font-bold uppercase flex items-center gap-1 transition-all ${turboMode ? "bg-gradient-to-r from-amber-500 to-orange-500 text-black shadow-[0_0_10px_rgba(251,191,36,0.4)]" : "bg-slate-800 text-slate-400 border border-slate-700"}`}
+            {/* Expanded Telemetry & Controls */}
+            {!isMinimized && (
+              <div
+                className="p-3 border-t space-y-2.5 text-xs font-mono"
+                style={{
+                  borderColor: "rgba(0,212,255,0.12)",
+                  background: "rgba(1, 8, 20, 0.7)",
+                }}
               >
-                <Zap size={9} /> {turboMode ? "TURBO" : "NORMAL"}
-              </button>
-            </div>
-
-            <div className="space-y-1">
-              <div className="flex justify-between text-[10px]">
-                <span className="text-slate-500">Sensitivity</span>
-                <span className="text-cyan-400 font-mono font-bold jarvis-text" style={{ fontSize: 10 }}>{sensitivity.toFixed(1)}×</span>
-              </div>
-              <input type="range" min="1.0" max="3.0" step="0.1" value={sensitivity}
-                onChange={e => setSensitivity(parseFloat(e.target.value))}
-                className="w-full h-1 rounded-full appearance-none cursor-pointer accent-cyan-400 bg-slate-800" />
-            </div>
-
-            <div className="h-px bg-slate-800" />
-
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
-              {[
-                { label: "Open Palm", action: "Rotate", color: "#00d4ff" },
-                { label: "Pinch",     action: "Zoom",   color: "#fbbf24" },
-                { label: "Point",     action: "Select", color: "#f472b6" },
-                { label: "Peace Sign", action: "JARVIS", color: "#10b981" },
-                { label: "2 Hands",   action: "Reset",  color: "#a78bfa" },
-              ].map(({ label, action, color }) => (
-                <div key={label} className="flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: color, boxShadow: `0 0 4px ${color}` }} />
-                  <span className="text-slate-500 truncate">{label}</span>
+                {/* Mode & Sensitivity Row */}
+                <div className="flex items-center justify-between gap-1">
+                  <span className="flex items-center gap-1 text-[10px] font-semibold text-slate-300 uppercase tracking-wider">
+                    <Gauge size={12} className="text-cyan-400" /> SENSORS
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setDualHandMode((v) => !v)}
+                      className={`px-1.5 py-0.5 rounded-lg text-[8px] font-bold uppercase transition-all ${
+                        dualHandMode
+                          ? "bg-indigo-600 text-white shadow-[0_0_8px_rgba(99,102,241,0.5)]"
+                          : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                      }`}
+                      title={dualHandMode ? "Tracking 2 Hands" : "Single Hand Mode (Ultra Fast 60 FPS)"}
+                    >
+                      {dualHandMode ? "2 HANDS" : "1 HAND (60FPS)"}
+                    </button>
+                    <button
+                      onClick={() => setTurboMode((v) => !v)}
+                      className={`px-2 py-0.5 rounded-lg text-[9px] font-bold uppercase flex items-center gap-1 transition-all ${
+                        turboMode
+                          ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-black font-semibold shadow-[0_0_12px_rgba(0,212,255,0.5)]"
+                          : "bg-slate-800 text-slate-400 border border-slate-700"
+                      }`}
+                    >
+                      <Zap size={10} /> {turboMode ? "TURBO" : "NORMAL"}
+                    </button>
+                  </div>
                 </div>
-              ))}
-            </div>
+
+                {/* Sensitivity Slider */}
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[10px]">
+                    <span className="text-slate-400">Response Gain</span>
+                    <span className="text-cyan-300 font-bold">{sensitivity.toFixed(1)}×</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1.0"
+                    max="3.0"
+                    step="0.1"
+                    value={sensitivity}
+                    onChange={(e) => setSensitivity(parseFloat(e.target.value))}
+                    className="w-full h-1 rounded-full appearance-none cursor-pointer accent-cyan-400 bg-slate-800"
+                  />
+                </div>
+
+                {/* Gesture Quick Reference */}
+                <div className="pt-1 border-t border-slate-800/80 grid grid-cols-2 gap-x-2 gap-y-1 text-[9px]">
+                  {[
+                    { name: "Open Palm", act: "3D Rotate", col: "#00d4ff" },
+                    { name: "Pinch",     act: "Zoom",      col: "#fbbf24" },
+                    { name: "Point",     act: "Dwell Pick",col: "#f472b6" },
+                    { name: "Thumbs Up", act: "Run Code",  col: "#22c55e" },
+                    { name: "Thumbs Down",act: "Reset View",col: "#ef4444" },
+                    { name: "Peace Sign",act: "JARVIS Mic",col: "#10b981" },
+                    { name: "Fist",      act: "Pause Flow",col: "#a855f7" },
+                    { name: "Swipe L/R", act: "Flow Step", col: "#38bdf8" },
+                  ].map(({ name, act, col }) => (
+                    <div key={name} className="flex items-center gap-1.5 truncate">
+                      <span
+                        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                        style={{ background: col, boxShadow: `0 0 4px ${col}` }}
+                      />
+                      <span className="text-slate-400 truncate">
+                        {name}: <span className="text-slate-200">{act}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* Loading overlay */}
+      {/* Loading Overlay */}
       {enabled && status === "loading" && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-md">
-          <div className="flex flex-col items-center gap-4 p-8 rounded-2xl glass-panel">
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-md">
+          <div
+            className="flex flex-col items-center gap-4 p-8 rounded-3xl"
+            style={{
+              background: "linear-gradient(135deg, rgba(2,12,32,0.95) 0%, rgba(1,6,18,0.98) 100%)",
+              border: "1px solid rgba(0,212,255,0.4)",
+              boxShadow: "0 8px 32px rgba(0,212,255,0.25)",
+            }}
+          >
             <div className="relative">
-              <div className="w-14 h-14 rounded-full border-2 border-cyan-400/30 animate-jarvis-glow-ring" />
+              <div className="w-16 h-16 rounded-full border-2 border-cyan-400/30 animate-ping" />
               <div className="absolute inset-0 flex items-center justify-center">
-                <Loader2 size={24} className="text-cyan-400 animate-spin" />
+                <Loader2 size={28} className="text-cyan-400 animate-spin" />
               </div>
             </div>
             <div className="text-center">
-              <p className="text-sm font-bold jarvis-text">INITIALIZING GESTURE ENGINE</p>
-              <p className="text-[11px] text-slate-500 mt-1 font-mono">Loading MediaPipe model...</p>
+              <p className="text-sm font-bold font-mono text-cyan-300 tracking-wider">
+                INITIALIZING J.A.R.V.I.S. VISION
+              </p>
+              <p className="text-[11px] text-slate-400 mt-1 font-mono">
+                Calibrating neural tracking sensors...
+              </p>
             </div>
           </div>
         </div>
       )}
 
-      {/* Error card */}
+      {/* Futuristic Error Card */}
       {enabled && status === "error" && (
-        <div className="absolute bottom-20 left-4 z-30 max-w-[280px] animate-slide-up">
-          <div className="flex items-start gap-3 bg-rose-950/90 border border-rose-500/40 rounded-xl p-4 shadow-2xl">
-            <CameraOff size={18} className="flex-shrink-0 text-rose-400 mt-0.5" />
+        <div className="fixed bottom-6 left-6 z-[300] max-w-[320px] animate-slide-up select-none">
+          <div
+            className="flex items-start gap-3 rounded-2xl p-4 shadow-2xl"
+            style={{
+              background: "linear-gradient(135deg, rgba(30, 6, 12, 0.96) 0%, rgba(15, 2, 6, 0.98) 100%)",
+              border: "1px solid rgba(244, 63, 94, 0.4)",
+              boxShadow: "0 8px 32px rgba(244, 63, 94, 0.25)",
+              backdropFilter: "blur(20px)",
+            }}
+          >
+            <ShieldAlert size={20} className="flex-shrink-0 text-rose-400 mt-0.5" />
             <div className="space-y-2">
-              <p className="text-xs text-rose-200 leading-relaxed">{errorMsg}</p>
-              <button onClick={onToggle} className="text-[11px] px-3 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 transition-all">
-                Dismiss
-              </button>
+              <div className="text-xs font-mono font-bold text-rose-300 tracking-wide">
+                JARVIS VISION OFFLINE
+              </div>
+              <p className="text-[11px] text-rose-200/90 leading-relaxed font-mono">
+                {errorMsg}
+              </p>
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  onClick={onToggle}
+                  className="text-[10px] font-mono px-3 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/40 transition-all"
+                >
+                  DISMISS
+                </button>
+              </div>
             </div>
           </div>
         </div>
       )}
     </>
   );
-}
-
-/* ─── Gesture Detection ─── */
-function detectGesture3D(landmarks: HandLandmark[]): { name: string } {
-  const wrist = landmarks[0], thumbTip = landmarks[4], indexTip = landmarks[8];
-  const middleTip = landmarks[12], ringTip = landmarks[16], pinkyTip = landmarks[20];
-  const indexMcp = landmarks[5], middleMcp = landmarks[9], ringMcp = landmarks[13], pinkyMcp = landmarks[17];
-  const dist3D = (a: HandLandmark, b: HandLandmark) => Math.hypot(a.x - b.x, a.y - b.y, (a.z || 0) - (b.z || 0));
-  const palmSize = dist3D(wrist, middleMcp);
-  if (palmSize === 0) return { name: "" };
-
-  const indexExt  = dist3D(indexTip,  wrist) > dist3D(indexMcp,  wrist) * 1.12;
-  const middleExt = dist3D(middleTip, wrist) > dist3D(middleMcp, wrist) * 1.12;
-  const ringExt   = dist3D(ringTip,   wrist) > dist3D(ringMcp,   wrist) * 1.12;
-  const pinkyExt  = dist3D(pinkyTip,  wrist) > dist3D(pinkyMcp,  wrist) * 1.12;
-
-  if (dist3D(thumbTip, indexTip) < palmSize * 0.38) return { name: "pinch" };
-  if (indexExt && middleExt && !ringExt && !pinkyExt) return { name: "peace" };
-  if (indexExt && !middleExt && !ringExt && !pinkyExt) return { name: "point" };
-  if (indexExt && middleExt && ringExt && pinkyExt) return { name: "open_palm" };
-  return { name: "" };
-}
-
-/* ─── Glowing Skeleton Renderer ─── */
-function drawGlowingSkeleton(
-  ctx: CanvasRenderingContext2D,
-  landmarks: HandLandmark[],
-  w: number, h: number,
-  primaryColor: string,
-  glowColor: string
-) {
-  const connections = [
-    [0,1],[1,2],[2,3],[3,4],
-    [0,5],[5,6],[6,7],[7,8],
-    [5,9],[9,10],[10,11],[11,12],
-    [9,13],[13,14],[14,15],[15,16],
-    [13,17],[17,18],[18,19],[19,20],
-    [0,17],[5,9],[9,13]
-  ];
-  const fingertips = new Set([4, 8, 12, 16, 20]);
-
-  // Glow bones
-  ctx.save();
-  ctx.shadowColor = primaryColor;
-  ctx.shadowBlur = 8;
-  ctx.strokeStyle = primaryColor;
-  ctx.lineWidth = 1.8;
-  ctx.globalAlpha = 0.9;
-  ctx.beginPath();
-  for (const [a, b] of connections) {
-    ctx.moveTo(landmarks[a].x * w, landmarks[a].y * h);
-    ctx.lineTo(landmarks[b].x * w, landmarks[b].y * h);
-  }
-  ctx.stroke();
-  ctx.restore();
-
-  // Draw joints
-  for (let i = 0; i < landmarks.length; i++) {
-    const lm = landmarks[i];
-    const x = lm.x * w, y = lm.y * h;
-    const isTip = fingertips.has(i);
-
-    ctx.save();
-    if (isTip) {
-      // Outer glow ring
-      ctx.shadowColor = primaryColor;
-      ctx.shadowBlur = 16;
-      ctx.beginPath();
-      ctx.arc(x, y, 7, 0, Math.PI * 2);
-      ctx.fillStyle = glowColor;
-      ctx.fill();
-      // Inner bright dot
-      ctx.shadowBlur = 6;
-      ctx.beginPath();
-      ctx.arc(x, y, 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = "#ffffff";
-      ctx.fill();
-      // Tiny center core
-      ctx.beginPath();
-      ctx.arc(x, y, 1.5, 0, Math.PI * 2);
-      ctx.fillStyle = primaryColor;
-      ctx.fill();
-    } else {
-      // Regular joint
-      ctx.shadowColor = primaryColor;
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      ctx.arc(x, y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = glowColor;
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(x, y, 1.5, 0, Math.PI * 2);
-      ctx.fillStyle = primaryColor;
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-}
-
-/* ─── Ghost Trail ─── */
-function drawGhostTrail(
-  ctx: CanvasRenderingContext2D,
-  landmarks: HandLandmark[],
-  w: number, h: number,
-  color: string
-) {
-  ctx.save();
-  ctx.globalAlpha = 0.18;
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 4;
-  for (let i = 0; i < landmarks.length; i++) {
-    const { x, y } = landmarks[i];
-    ctx.beginPath();
-    ctx.arc(x * w, y * h, 2, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-  }
-  ctx.restore();
 }

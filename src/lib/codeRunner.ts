@@ -4,7 +4,7 @@ export interface LogEntry {
   id: string;
   type: "log" | "info" | "warn" | "error" | "table" | "return";
   message: string;
-  data?: any;
+  data?: unknown;
   timestamp: string;
   line?: number;
 }
@@ -12,7 +12,7 @@ export interface LogEntry {
 export interface ExecutionResult {
   success: boolean;
   logs: LogEntry[];
-  returnValue?: any;
+  returnValue?: unknown;
   executionTimeMs: number;
   error?: {
     name: string;
@@ -28,8 +28,8 @@ function transpileTypeScriptToJS(code: string): string {
   let clean = code;
 
   // 1. Remove JSX syntax (convert JSX tags to comments / log placeholders)
-  clean = clean.replace(/<[A-Za-z0-9_.\$]+(\s+[^>]*?)?>([\s\S]*?)<\/[A-Za-z0-9_.\$]+>/g, (_, tag) => `/* JSX element ${tag} */`);
-  clean = clean.replace(/<[A-Za-z0-9_.\$]+(\s+[^>]*?)?\/>/g, (_, tag) => `/* JSX element ${tag} */`);
+  clean = clean.replace(/<[A-Za-z0-9_.$]+(\s+[^>]*?)?>([\s\S]*?)<\/[A-Za-z0-9_.$]+>/g, (_, tag) => `/* JSX element ${tag} */`);
+  clean = clean.replace(/<[A-Za-z0-9_.$]+(\s+[^>]*?)?\/>/g, (_, tag) => `/* JSX element ${tag} */`);
 
   // 2. Remove ES imports
   clean = clean.replace(/import\s+[\s\S]*?\s+from\s+['"`][^'"`]+['`"];?/g, "");
@@ -57,8 +57,7 @@ function transpileTypeScriptToJS(code: string): string {
 
 export async function runCodeSnippet(
   file: CodeFile,
-  graph?: FlowGraph,
-  allFiles?: CodeFile[]
+  graph?: FlowGraph
 ): Promise<ExecutionResult> {
   const startTime = performance.now();
   const logs: LogEntry[] = [];
@@ -69,7 +68,7 @@ export async function runCodeSnippet(
     return `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}.${now.getMilliseconds().toString().padStart(3, "0")}`;
   };
 
-  const pushLog = (type: LogEntry["type"], args: any[]) => {
+  const pushLog = (type: LogEntry["type"], args: unknown[]) => {
     const formatted = args
       .map((a) => {
         if (typeof a === "object" && a !== null) {
@@ -84,7 +83,7 @@ export async function runCodeSnippet(
       .join(" ");
 
     logs.push({
-      id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       type,
       message: formatted,
       data: args.length === 1 ? args[0] : args,
@@ -102,10 +101,11 @@ export async function runCodeSnippet(
       const executionTimeMs = Math.max(1, Math.round(performance.now() - startTime));
       pushLog("return", ["Valid JSON parsed successfully:", parsed]);
       return { success: true, logs, returnValue: parsed, executionTimeMs };
-    } catch (e: any) {
+    } catch (e: unknown) {
+      const err = e as Error;
       const executionTimeMs = Math.max(1, Math.round(performance.now() - startTime));
-      pushLog("error", ["JSON Parse Error:", e.message]);
-      return { success: false, logs, executionTimeMs, error: { name: "JSONError", message: e.message } };
+      pushLog("error", ["JSON Parse Error:", err.message]);
+      return { success: false, logs, executionTimeMs, error: { name: "JSONError", message: err.message } };
     }
   }
 
@@ -114,8 +114,8 @@ export async function runCodeSnippet(
     pushLog("info", [`[Python 3.11 Interpreter] Executing ${file.filename}...`]);
 
     const lines = file.content.split("\n");
-    let hasFastApi = file.content.includes("FastAPI");
-    let hasSqlAlchemy = file.content.includes("sqlalchemy") || file.content.includes("SessionLocal") || file.content.includes("create_engine");
+    const hasFastApi = file.content.includes("FastAPI");
+    const hasSqlAlchemy = file.content.includes("sqlalchemy") || file.content.includes("SessionLocal") || file.content.includes("create_engine");
 
     if (hasFastApi) {
       pushLog("info", ["[FastAPI Server] Initializing application routes..."]);
@@ -212,11 +212,11 @@ export async function runCodeSnippet(
 
   // JavaScript / TypeScript / TSX Environment Execution
   const customConsole = {
-    log: (...args: any[]) => pushLog("log", args),
-    info: (...args: any[]) => pushLog("info", args),
-    warn: (...args: any[]) => pushLog("warn", args),
-    error: (...args: any[]) => pushLog("error", args),
-    table: (data: any) => pushLog("table", [data]),
+    log: (...args: unknown[]) => pushLog("log", args),
+    info: (...args: unknown[]) => pushLog("info", args),
+    warn: (...args: unknown[]) => pushLog("warn", args),
+    error: (...args: unknown[]) => pushLog("error", args),
+    table: (data: unknown) => pushLog("table", [data]),
     clear: () => logs.splice(0, logs.length),
   };
 
@@ -230,11 +230,11 @@ export async function runCodeSnippet(
       pushLog("info", [`[Database Query Executed]: "${sql}"`]);
       return [{ id: 101, status: "active", count: 42, timestamp: new Date().toISOString() }];
     },
-    find: (filter: any) => [{ id: 1, ...filter, status: "found" }],
-    insert: (data: any) => ({ id: Math.floor(Math.random() * 1000), ...data, created_at: new Date().toISOString() }),
+    find: (filter: Record<string, unknown>) => [{ id: 1, ...filter, status: "found" }],
+    insert: (data: Record<string, unknown>) => ({ id: Math.floor(Math.random() * 1000), ...data, created_at: new Date().toISOString() }),
   };
 
-  const mockFetch = async (url: string, options?: any) => {
+  const mockFetch = async (url: string, options?: { method?: string; body?: unknown; headers?: Record<string, string> }) => {
     pushLog("info", [`[HTTP Request Simulated] ${options?.method || "GET"} ${url}`]);
     if (graph) {
       const matchedNode = graph.nodes.find(
@@ -258,7 +258,7 @@ export async function runCodeSnippet(
   };
 
   try {
-    let cleanJs = transpileTypeScriptToJS(file.content);
+    const cleanJs = transpileTypeScriptToJS(file.content);
 
     // Auto-invoke component or main function if defined
     let autoInvoke = "";
@@ -303,14 +303,15 @@ export async function runCodeSnippet(
       executionTimeMs,
       highlightNodeId,
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const errorObj = err as Error;
     const executionTimeMs = Math.max(1, Math.round(performance.now() - startTime));
-    const errorMsg = err?.message || String(err);
-    const errorName = err?.name || "RuntimeError";
+    const errorMsg = errorObj?.message || String(err);
+    const errorName = errorObj?.name || "RuntimeError";
 
     let lineNum: number | undefined;
-    if (err?.stack) {
-      const match = err.stack.match(/<anonymous>:(\d+):(\d+)/);
+    if (errorObj?.stack) {
+      const match = errorObj.stack.match(/<anonymous>:(\d+):(\d+)/);
       if (match) {
         lineNum = Math.max(1, parseInt(match[1], 10) - 2);
       }
@@ -326,7 +327,7 @@ export async function runCodeSnippet(
         name: errorName,
         message: errorMsg,
         line: lineNum,
-        stack: err?.stack,
+        stack: errorObj?.stack,
       },
       highlightNodeId,
     };

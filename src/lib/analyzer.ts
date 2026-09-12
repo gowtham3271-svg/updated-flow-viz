@@ -1,4 +1,4 @@
-import type { CodeFile, FlowGraph, FlowNode, FlowEdge, NodeKind, EdgeKind } from "@/types";
+import type { CodeFile, FlowGraph, FlowNode, FlowEdge } from "@/types";
 
 let counter = 0;
 const uid = (prefix: string) => `${prefix}_${counter++}_${Math.random().toString(36).slice(2, 7)}`;
@@ -51,7 +51,6 @@ interface ImportDef {
   snippet: string;
 }
 
-const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
 function detectLanguage(filename: string): CodeFile["language"] {
   const ext = filename.split(".").pop()?.toLowerCase() ?? "";
@@ -91,7 +90,7 @@ export function analyzeFiles(files: CodeFile[]): FlowGraph {
     }
   }
 
-  return buildGraph(routes, queries, fetches, funcs, imports, files);
+  return buildGraph(routes, queries, fetches, funcs);
 }
 
 function analyzePython(
@@ -507,8 +506,6 @@ function buildGraph(
   queries: QueryDef[],
   fetches: FetchDef[],
   funcs: FuncDef[],
-  imports: ImportDef[],
-  files: CodeFile[],
 ): FlowGraph {
   const nodes: FlowNode[] = [];
   const edges: FlowEdge[] = [];
@@ -519,32 +516,41 @@ function buildGraph(
   const funcNodes = new Map<string, FlowNode>();
 
   for (const f of fetches) {
-    const id = `fe_${f.id}`;
+    const isAi = /openai|groq|anthropic|ollama|cohere|huggingface|langchain|embedding|completion|rag|vector/i.test(f.url + " " + f.snippet);
+    const isApi = /api\.|stripe\.|github\.|twilio\.|sendgrid\.|supabase\./i.test(f.url);
+    const kind = isAi ? "ai" : isApi ? "api" : "frontend";
+    const layer = isAi ? 4 : isApi ? 1 : 0;
+
+    const id = `${isAi ? "ai" : isApi ? "api" : "fe"}_${f.id}`;
     const node: FlowNode = {
       id,
-      kind: "frontend",
+      kind,
       label: `${f.method} ${shortUrl(f.url)}`,
-      detail: `HTTP ${f.method} request to ${f.url}`,
+      detail: isAi ? `AI LLM request to ${f.url}` : `HTTP ${f.method} request to ${f.url}`,
       snippet: f.snippet,
       line: f.line,
       file: f.file,
-      layer: 0,
+      layer,
     };
     frontendNodes.set(id, node);
     nodes.push(node);
   }
 
   for (const r of routes) {
+    const isAiRoute = /ai|chat|generate|embed|rag|agent|predict|classify/i.test(r.path + " " + r.funcName);
+    const kind = isAiRoute ? "ai" : "backend";
+    const layer = isAiRoute ? 4 : 1;
+
     const id = `be_${r.id}`;
     const node: FlowNode = {
       id,
-      kind: "backend",
+      kind,
       label: `${r.method} ${r.path}`,
-      detail: `Route handler → ${r.funcName}()`,
+      detail: isAiRoute ? `AI inference route handler → ${r.funcName}()` : `Route handler → ${r.funcName}()`,
       snippet: r.snippet,
       line: r.line,
       file: r.file,
-      layer: 1,
+      layer,
     };
     backendNodes.set(id, node);
     nodes.push(node);
@@ -560,7 +566,7 @@ function buildGraph(
       snippet: q.snippet,
       line: q.line,
       file: q.file,
-      layer: 2,
+      layer: 3,
     };
     dbNodes.set(id, node);
     nodes.push(node);
@@ -568,7 +574,23 @@ function buildGraph(
 
   for (const f of funcs) {
     if (routes.some((r) => r.funcName === f.name)) continue;
-    if (f.kind === "component") {
+    const isAiFunc = /ai|gpt|llm|rag|embed|completion|claude|gemini|groq|agent|neural/i.test(f.name + " " + f.snippet);
+
+    if (isAiFunc) {
+      const id = `ai_${f.id}`;
+      const node: FlowNode = {
+        id,
+        kind: "ai",
+        label: f.name,
+        detail: "AI / LLM agent pipeline",
+        snippet: f.snippet,
+        line: f.line,
+        file: f.file,
+        layer: 4,
+      };
+      funcNodes.set(id, node);
+      nodes.push(node);
+    } else if (f.kind === "component") {
       const id = `fe_${f.id}`;
       const node: FlowNode = {
         id,
@@ -592,7 +614,7 @@ function buildGraph(
         snippet: f.snippet,
         line: f.line,
         file: f.file,
-        layer: 1,
+        layer: 2,
       };
       funcNodes.set(id, node);
       nodes.push(node);
@@ -759,7 +781,23 @@ export function explainNode(node: FlowNode, graph: FlowGraph): string {
     case "function": {
       return `This is a helper function. It's called by other parts of the code to perform a specific task, keeping the logic organized and reusable.`;
     }
+    case "ai": {
+      return `This is an AI / RAG system node. It handles natural language processing, LLM embeddings, contextual prompt engineering, or neural model inference.`;
+    }
+    case "api": {
+      return `This is an API Gateway or external integration service. It interfaces incoming and outgoing telemetry across distributed network boundaries.`;
+    }
+    case "service": {
+      return `This is a core microservice or background orchestrator providing business domain logic.`;
+    }
+    case "storage": {
+      return `This is an object/file storage layer holding static media, blobs, or serialized project state.`;
+    }
+    case "cloud": {
+      return `This is a cloud infrastructure component or external third-party platform provider.`;
+    }
   }
+  return `This is a system architecture node representing ${node.label}.`;
 }
 
 export function explainEdge(edge: FlowEdge, graph: FlowGraph): string {

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { Plus, Trash2, X, ChevronRight, FileCode2, Play, Terminal } from "lucide-react";
+import { Plus, X, ChevronRight, FileCode2, Play } from "lucide-react";
 import type { CodeFile } from "@/types";
 import { tokenizeLine, type Token } from "@/lib/syntaxHighlight";
 import { getLanguageLabel } from "@/lib/fileUtils";
@@ -16,6 +16,8 @@ interface CodeEditorProps {
   onDeleteFile: (i: number) => void;
   analyzing: boolean;
   onCursorChange?: (line: number, col: number) => void;
+  onLineSelect?: (line: number) => void;
+  highlightedLine?: number | null;
   onRunCode?: () => void;
   executionLogs?: LogEntry[];
   executionResult?: ExecutionResult | null;
@@ -70,9 +72,10 @@ export function CodeEditor({
   onActiveFileChange,
   onFileContentChange,
   onAddFile,
-  onDeleteFile,
   analyzing,
   onCursorChange,
+  onLineSelect,
+  highlightedLine,
   onRunCode,
   executionLogs = [],
   executionResult = null,
@@ -95,16 +98,18 @@ export function CodeEditor({
 
   useEffect(() => {
     setLocalContent(current?.content ?? "");
-    if (current && !openTabs.includes(activeFile)) {
-      setOpenTabs((prev) => [...prev, activeFile]);
+    if (current) {
+      setOpenTabs((prev) => prev.includes(activeFile) ? prev : [...prev, activeFile]);
     }
-  }, [activeFile, current?.content]);
+  }, [activeFile, current]);
 
+  // Smoothly scroll to the highlighted line from 3D node selection
   useEffect(() => {
-    if (current && !openTabs.includes(activeFile)) {
-      setOpenTabs((prev) => [...prev, activeFile]);
-    }
-  }, [activeFile, current, openTabs]);
+    if (!highlightedLine || !textareaRef.current) return;
+    const lineHeight = 20;
+    const targetScroll = Math.max(0, (highlightedLine - 3) * lineHeight);
+    textareaRef.current.scrollTo({ top: targetScroll, behavior: "smooth" });
+  }, [highlightedLine]);
 
   const lines = localContent.split("\n");
 
@@ -123,7 +128,8 @@ export function CodeEditor({
     setCursorLine(lineNum);
     setCursorCol(colNum);
     onCursorChange?.(lineNum, colNum);
-  }, [onCursorChange]);
+    onLineSelect?.(lineNum);
+  }, [onCursorChange, onLineSelect]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Tab") {
@@ -263,7 +269,13 @@ export function CodeEditor({
           {lines.map((_, i) => (
             <div
               key={i}
-              className={`leading-5 ${i + 1 === cursorLine ? "text-accent-primary font-medium" : ""}`}
+              className={`leading-5 transition-colors ${
+                i + 1 === highlightedLine
+                  ? "text-cyan-300 font-bold bg-cyan-500/30 rounded-l"
+                  : i + 1 === cursorLine
+                  ? "text-accent-primary font-medium"
+                  : ""
+              }`}
             >
               {i + 1}
             </div>
@@ -280,7 +292,11 @@ export function CodeEditor({
           {highlightedLines.map((html, i) => (
             <div
               key={i}
-              className="leading-5 min-h-5"
+              className={`leading-5 min-h-5 transition-all ${
+                i + 1 === highlightedLine
+                  ? "bg-cyan-500/15 border-l-2 border-cyan-400 pl-1 rounded-r shadow-[inset_0_0_12px_rgba(34,211,238,0.15)]"
+                  : ""
+              }`}
               dangerouslySetInnerHTML={{ __html: html || "&nbsp;" }}
             />
           ))}

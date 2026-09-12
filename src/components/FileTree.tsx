@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback } from "react";
 import {
   ChevronRight, ChevronDown, FileCode2, FileJson, FileText,
   Folder, FolderOpen, FileCog, FileType2, Hash, Braces, Globe,
-  Plus, Search, Upload, Trash2,
+  Plus, Search, Upload,
 } from "lucide-react";
 import type { TreeNode, CodeLanguage } from "@/types";
 import { getLanguageColor } from "@/lib/fileUtils";

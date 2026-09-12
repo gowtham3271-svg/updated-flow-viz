@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Info, ArrowRight, Database, Server, Monitor, Code2, RefreshCw, BookOpen, ExternalLink, GitBranch, Layers, Sparkles, AlertCircle, AlertTriangle, Info as InfoIcon } from "lucide-react";
+import { Info, ArrowRight, Database, Server, Monitor, Code2, RefreshCw, BookOpen, ExternalLink, GitBranch, Layers, Sparkles, AlertCircle, AlertTriangle, Globe, Cloud, HardDrive, Info as InfoIcon } from "lucide-react";
 import type { FlowGraph, FlowNode, FlowEdge, CodeFile } from "@/types";
 import { EDGE_COLORS, NODE_COLORS } from "@/types";
 import { explainNode, explainEdge } from "@/lib/analyzer";
@@ -18,18 +18,28 @@ interface InfoPanelProps {
   onJumpToIssue: (file: string, line: number) => void;
 }
 
-const KIND_ICON = {
+const KIND_ICON: Record<FlowNode["kind"], typeof Monitor> = {
   frontend: Monitor,
   backend: Server,
   database: Database,
   function: Code2,
+  api: Globe,
+  service: Server,
+  ai: Sparkles,
+  storage: HardDrive,
+  cloud: Cloud,
 };
 
-const KIND_LABEL = {
+const KIND_LABEL: Record<FlowNode["kind"], string> = {
   frontend: "Frontend",
   backend: "Backend",
   database: "Database",
   function: "Function",
+  api: "API Gateway",
+  service: "Microservice",
+  ai: "AI / Neural Pipeline",
+  storage: "Object Storage",
+  cloud: "Cloud Infrastructure",
 };
 
 function SectionHeader({ icon: Icon, title, accent }: { icon: typeof Info; title: string; accent: string }) {
@@ -66,7 +76,7 @@ function DocLinks({ links }: { links: { technology: string; label: string; url: 
   );
 }
 
-export function InfoPanel({ graph, activeStep, selectedNodeId, onClearSelection, files, onAskAi, issues, onJumpToIssue }: InfoPanelProps) {
+export function InfoPanel({ graph, activeStep, selectedNodeId, onClearSelection, onAskAi, issues, onJumpToIssue }: InfoPanelProps) {
   const [activeTab, setActiveTab] = useState<"details" | "issues">("details");
 
   const activeEdge: FlowEdge | null = activeStep !== null ? graph.edges[activeStep] ?? null : null;

@@ -1,9 +1,31 @@
-type GestureListener<T> = (data: T) => void;
+export type GestureListener<T> = (data: T) => void;
+
+export interface GestureEventMap {
+  rotate: { dx: number; dy: number };
+  zoom: { delta: number };
+  reset: boolean;
+  click: { x: number; y: number };
+  peace: boolean;
+  run_code: boolean;
+  play_flow: boolean;
+  pause_flow: boolean;
+  step_forward: boolean;
+  step_back: boolean;
+  cancel: boolean;
+  gesture_confirmed: { gesture: string; action: string };
+}
 
 class EventBus {
-  private listeners: { [event: string]: GestureListener<any>[] } = {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private listeners: { [event: string]: ((data: any) => void)[] } = {};
 
-  on<T>(event: string, listener: GestureListener<T>) {
+  on<K extends keyof GestureEventMap>(
+    event: K,
+    listener: GestureListener<GestureEventMap[K]>
+  ): () => void;
+  on<T = unknown>(event: string, listener: GestureListener<T>): () => void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on(event: string, listener: (data: any) => void): () => void {
     if (!this.listeners[event]) {
       this.listeners[event] = [];
     }
@@ -11,12 +33,24 @@ class EventBus {
     return () => this.off(event, listener);
   }
 
-  off<T>(event: string, listener: GestureListener<T>) {
+  off<K extends keyof GestureEventMap>(
+    event: K,
+    listener: GestureListener<GestureEventMap[K]>
+  ): void;
+  off<T = unknown>(event: string, listener: GestureListener<T>): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  off(event: string, listener: (data: any) => void): void {
     if (!this.listeners[event]) return;
     this.listeners[event] = this.listeners[event].filter((l) => l !== listener);
   }
 
-  emit<T>(event: string, data: T) {
+  emit<K extends keyof GestureEventMap>(
+    event: K,
+    data: GestureEventMap[K]
+  ): void;
+  emit<T = unknown>(event: string, data: T): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  emit(event: string, data: any): void {
     if (!this.listeners[event]) return;
     for (const listener of this.listeners[event]) {
       listener(data);

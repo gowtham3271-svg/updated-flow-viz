@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import {
   Terminal, Play, Trash2, Copy, Check, ChevronDown, ChevronUp,
-  AlertCircle, Info, AlertTriangle, CornerDownLeft, Sparkles,
-  Maximize2, Minimize2, CheckCircle2, Clock, X
+  AlertCircle, AlertTriangle, Sparkles,
+  Maximize2, Minimize2, CheckCircle2, Clock
 } from "lucide-react";
 import type { LogEntry, ExecutionResult } from "@/lib/codeRunner";
 import type { CodeIssue } from "@/lib/issues";

@@ -228,7 +228,7 @@ function tokenizeCode(line: string, lang: CodeLanguage): Token[] {
       continue;
     }
 
-    if (/[(){}\[\];,.]/.test(c)) {
+    if (/[(){}[\];,.]/.test(c)) {
       tokens.push({ text: c, type: "punctuation" });
       i++;
       continue;

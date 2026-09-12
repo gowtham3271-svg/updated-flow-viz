@@ -10,7 +10,7 @@ interface AnnotationModalProps {
   onClose: () => void;
 }
 
-export function AnnotationModal({ nodeId, nodeLabel, currentText, onSave, onDelete, onClose }: AnnotationModalProps) {
+export function AnnotationModal({ nodeLabel, currentText, onSave, onDelete, onClose }: AnnotationModalProps) {
   const [text, setText] = useState(currentText ?? "");
 
   return (

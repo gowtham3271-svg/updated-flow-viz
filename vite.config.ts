@@ -61,7 +61,7 @@ export default defineConfig(({ mode }) => {
                     const mData = await mRes.json();
                     if (Array.isArray(mData?.data)) {
                       const live = mData.data
-                        .map((m: any) => m.id as string)
+                        .map((m: { id?: string }) => (m.id || '') as string)
                         .filter(
                           (id: string) =>
                             (id.includes('llama') || id.includes('qwen')) &&
@@ -104,18 +104,18 @@ export default defineConfig(({ mode }) => {
                     } else {
                       lastErr = await response.json().catch(() => ({}));
                     }
-                  } catch (e: any) {
-                    lastErr = { error: e.message };
+                  } catch (e: unknown) {
+                    lastErr = { error: (e as Error).message };
                   }
                 }
 
                 res.statusCode = 500;
                 res.setHeader('Content-Type', 'application/json');
                 res.end(JSON.stringify({ error: lastErr || 'Model request failed' }));
-              } catch (err: any) {
+              } catch (err: unknown) {
                 res.statusCode = 500;
                 res.setHeader('Content-Type', 'application/json');
-                res.end(JSON.stringify({ error: err.message }));
+                res.end(JSON.stringify({ error: (err as Error).message }));
               }
             });
           });

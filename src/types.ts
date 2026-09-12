@@ -1,4 +1,13 @@
-export type NodeKind = "frontend" | "backend" | "database" | "function";
+export type NodeKind =
+  | "frontend"
+  | "backend"
+  | "database"
+  | "function"
+  | "api"
+  | "service"
+  | "ai"
+  | "storage"
+  | "cloud";
 
 export interface FlowNode {
   id: string;
@@ -83,6 +92,11 @@ export const NODE_COLORS: Record<NodeKind, string> = {
   backend: "#38bdf8",
   database: "#a78bfa",
   function: "#fbbf24",
+  api: "#34d399",
+  service: "#60a5fa",
+  ai: "#f43f5e",
+  storage: "#c084fc",
+  cloud: "#0ea5e9",
 };
 
 export interface TreeNode {

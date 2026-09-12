@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Save, FolderOpen, Trash2, X, FileText } from "lucide-react";
+import { Save, Trash2, X, FileText } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import type { SavedProject, CodeFile, FlowGraph, Annotation } from "@/types";
 

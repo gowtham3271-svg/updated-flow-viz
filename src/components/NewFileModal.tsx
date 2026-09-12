@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { X, FilePlus2, Folder } from "lucide-react";
+import { X, FilePlus2 } from "lucide-react";
 import type { CodeLanguage } from "@/types";
 import { detectLanguage, getLanguageLabel, getLanguageColor } from "@/lib/fileUtils";
 

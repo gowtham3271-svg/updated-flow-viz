@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
-  Boxes, FolderOpen, Sparkles, Eye, StickyNote, Code2, Network,
+  FolderOpen, Sparkles, StickyNote, Code2, Network,
   Info, Monitor, Server, Database, Sun, Moon, MessageSquare, X,
-  Upload, Search, Command, RefreshCw, PanelLeftClose, PanelLeft,
-  Plus, ZoomIn, ZoomOut, Maximize2, Minimize2, ChevronDown, Loader2,
+  Upload, Search, Command, PanelLeftClose, PanelLeft,
+  ZoomIn, ZoomOut, Maximize2, Minimize2, ChevronDown, Loader2,
   Play, Shield, Hand, AlertTriangle, Zap,
 } from "lucide-react";
 import { NODE_COLORS, EDGE_COLORS } from "@/types";
@@ -11,7 +11,7 @@ import type { CodeFile, FlowGraph, Annotation, SavedProject, CodeLanguage } from
 import { analyzeFiles } from "@/lib/analyzer";
 import { SAMPLE_PROJECTS } from "@/lib/samples";
 import { buildFileTree } from "@/lib/fileTree";
-import { readFilesFromPicker, detectLanguage } from "@/lib/fileUtils";
+import { readFilesFromPicker } from "@/lib/fileUtils";
 import { detectIssues, getIssueCounts, type CodeIssue } from "@/lib/issues";
 import { runSecurityScan } from "@/lib/chat";
 import { runCodeSnippet, type LogEntry, type ExecutionResult } from "@/lib/codeRunner";
@@ -29,6 +29,7 @@ import { StatusBar } from "@/components/StatusBar";
 import { NewFileModal } from "@/components/NewFileModal";
 import { HandGestureControl } from "@/components/HandGestureControl";
 import { JarvisOracle } from "@/components/JarvisOracle";
+import { gestureEvents } from "@/lib/gestureEvents";
 import { useTheme } from "@/lib/useTheme";
 import { useResizablePanels, PanelDivider } from "@/lib/useResizablePanels";
 
@@ -85,15 +86,17 @@ function App() {
   // Fullscreen + hand gesture state
   const [fullscreen, setFullscreen] = useState(false);
   const [handControlEnabled, setHandControlEnabled] = useState(false);
-  const [externalRotate, setExternalRotate] = useState<{ x: number; y: number; ts: number } | null>(null);
-  const [externalZoom, setExternalZoom] = useState<{ delta: number; ts: number } | null>(null);
-  const [externalReset, setExternalReset] = useState(0);
-  const [externalClick, setExternalClick] = useState<{ x: number; y: number; ts: number } | null>(null);
 
   // Chat pre-fill state
   const [chatPrefill, setChatPrefill] = useState<string | null>(null);
   // JARVIS highlighted node
   const [jarvisHighlightId, setJarvisHighlightId] = useState<string | null>(null);
+
+  // 3D Scene External Hand Gesture controls
+  const [externalRotate, setExternalRotate] = useState<{ x: number; y: number; ts: number } | null>(null);
+  const [externalZoom, setExternalZoom] = useState<{ delta: number; ts: number } | null>(null);
+  const [externalReset, setExternalReset] = useState<number>(0);
+  const [lastConfirmedGesture, setLastConfirmedGesture] = useState<{ gesture: string; action: string; ts: number } | null>(null);
 
   const folderInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -107,7 +110,7 @@ function App() {
     setShowEditor(true);
     setConsoleOpen(true);
     try {
-      const res = await runCodeSnippet(currentFile, graph, files);
+      const res = await runCodeSnippet(currentFile, graph);
       setExecutionLogs(res.logs);
       setExecutionResult(res);
       if (res.highlightNodeId) {
@@ -115,7 +118,7 @@ function App() {
         setJarvisHighlightId(res.highlightNodeId);
         setTimeout(() => setJarvisHighlightId(null), 4000);
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Code execution failed:", e);
     } finally {
       setIsRunningCode(false);
@@ -240,7 +243,61 @@ function App() {
     setActiveFile(0);
   };
 
-  const handleNodeClick = (id: string) => setSelectedNodeId(id);
+  const handleNodeClick = (id: string) => {
+    setSelectedNodeId(id);
+    const node = graph.nodes.find((n) => n.id === id);
+    if (node && node.file) {
+      const idx = files.findIndex((f) => f.filename === node.file || f.path === node.file);
+      if (idx >= 0) {
+        setActiveFile(idx);
+        setCursorLine(node.line);
+        setShowEditor(true);
+      }
+    }
+  };
+
+  // Unified J.A.R.V.I.S. Command & Gesture Event Listener
+  useEffect(() => {
+    const unsubs = [
+      gestureEvents.on("run_code", () => {
+        handleRunCode();
+      }),
+      gestureEvents.on("play_flow", () => {
+        handlePlay();
+      }),
+      gestureEvents.on("pause_flow", () => {
+        handlePause();
+      }),
+      gestureEvents.on("step_forward", () => {
+        handleStepForward();
+      }),
+      gestureEvents.on("step_back", () => {
+        handleStepBack();
+      }),
+      gestureEvents.on("reset", () => {
+        setExternalReset(Date.now());
+        setResetTrigger((t) => t + 1);
+      }),
+      gestureEvents.on("gesture_confirmed", ({ gesture, action }) => {
+        setLastConfirmedGesture({ gesture, action, ts: Date.now() });
+        setTimeout(() => setLastConfirmedGesture(null), 3000);
+      }),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, [handleRunCode]);
+
+  const handleLineSelect = (line: number) => {
+    const current = files[activeFile];
+    if (!current) return;
+    const matchedNode = graph.nodes.find(
+      (n) =>
+        (n.file === current.filename || n.file === current.path) &&
+        Math.abs(n.line - line) <= 3
+    );
+    if (matchedNode && matchedNode.id !== selectedNodeId) {
+      setSelectedNodeId(matchedNode.id);
+    }
+  };
 
   const handleLoadProject = (project: SavedProject) => {
     setFiles(project.files);
@@ -390,7 +447,7 @@ function App() {
   };
 
   // Security scan
-  const handleSecurityScan = async () => {
+  const handleSecurityScan = useCallback(async () => {
     setScanning(true);
     try {
       const aiIssues = await runSecurityScan(files, graph);
@@ -418,7 +475,7 @@ function App() {
     } finally {
       setScanning(false);
     }
-  };
+  }, [files, graph]);
 
   const handleAskAi = (question: string) => {
     setChatPrefill(question);
@@ -491,16 +548,77 @@ function App() {
             flowProgress={flowProgress}
             theme={theme}
             focusNodeId={jarvisHighlightId ?? selectedNodeId}
-            onZoomIn={() => {}}
-            onZoomOut={() => {}}
-            onResetView={() => {}}
+            onZoomIn={() => setZoomTrigger((t) => t + 1)}
+            onZoomOut={() => setZoomTrigger((t) => t - 1)}
+            onResetView={() => setResetTrigger((t) => t + 1)}
             zoomTrigger={zoomTrigger}
             resetTrigger={resetTrigger}
             externalRotate={externalRotate}
             externalZoom={externalZoom}
             externalReset={externalReset}
-            externalClick={externalClick}
           />
+
+          {/* J.A.R.V.I.S. 3D Visual Targeting Reticle HUD Banner in Fullscreen */}
+          {jarvisHighlightId && (() => {
+            const targetNode = graph.nodes.find((n) => n.id === jarvisHighlightId);
+            if (!targetNode) return null;
+            return (
+              <div
+                className="absolute top-20 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 px-4 py-2 rounded-2xl select-none animate-slide-up"
+                style={{
+                  background: "linear-gradient(135deg, rgba(2,12,32,0.94) 0%, rgba(1,6,18,0.98) 100%)",
+                  border: "1px solid rgba(0,212,255,0.5)",
+                  boxShadow: "0 4px 24px rgba(0,212,255,0.35)",
+                  backdropFilter: "blur(20px)",
+                }}
+              >
+                <div className="relative w-5 h-5 flex-shrink-0">
+                  <div className="absolute inset-0 rounded-full border border-cyan-400 animate-ping" />
+                  <div className="absolute inset-0.5 rounded-full border border-cyan-500 animate-spin" />
+                  <div className="w-2 h-2 rounded-full bg-cyan-400 absolute inset-0 m-auto" />
+                </div>
+                <div className="text-left">
+                  <div className="text-[10px] font-mono tracking-widest text-cyan-300 font-bold flex items-center gap-2">
+                    <span>J.A.R.V.I.S. 3D TARGETING</span>
+                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-normal">
+                      {targetNode.kind.toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="text-[11px] font-mono text-slate-100 font-semibold flex items-center gap-2">
+                    <span>{targetNode.label}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setJarvisHighlightId(null)}
+                  className="ml-2 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                  title="Dismiss target"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            );
+          })()}
+
+          {/* Confirmed Hand Gesture Notification Banner in Fullscreen */}
+          {lastConfirmedGesture && (
+            <div
+              className="absolute top-28 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-4 py-1.5 rounded-full select-none animate-slide-up pointer-events-none"
+              style={{
+                background: "linear-gradient(135deg, rgba(2,12,32,0.94) 0%, rgba(1,6,18,0.98) 100%)",
+                border: "1px solid rgba(0,212,255,0.45)",
+                boxShadow: "0 0 20px rgba(0,212,255,0.3)",
+                backdropFilter: "blur(20px)",
+              }}
+            >
+              <Sparkles size={13} className="text-cyan-400 animate-spin" />
+              <span className="text-[10px] font-mono font-bold text-cyan-300 tracking-wider">
+                GESTURE COMMAND //
+              </span>
+              <span className="text-[10px] font-mono text-white font-semibold">
+                {lastConfirmedGesture.gesture}: {lastConfirmedGesture.action}
+              </span>
+            </div>
+          )}
 
           {/* JARVIS Oracle in Fullscreen */}
           <JarvisOracle
@@ -515,7 +633,7 @@ function App() {
             onStepForward={handleStepForward}
             onStepBack={handleStepBack}
             onZoomIn={() => setZoomTrigger((t) => t + 1)}
-            onZoomOut={() => setZoomTrigger((t) => t + 1)}
+            onZoomOut={() => setZoomTrigger((t) => t - 1)}
             onResetView={() => setResetTrigger((t) => t + 1)}
             onSelectFile={handleFileSelect}
             onRunAnalysis={runAnalysis}
@@ -533,7 +651,7 @@ function App() {
               <ZoomIn size={16} />
             </button>
             <button
-              onClick={() => setZoomTrigger((t) => t + 1)}
+              onClick={() => setZoomTrigger((t) => t - 1)}
               className="w-9 h-9 rounded-xl bg-app-card hover:bg-app-hover text-fg-secondary hover:text-accent-primary flex items-center justify-center transition-all"
               title="Zoom out"
             >
@@ -560,7 +678,7 @@ function App() {
             </button>
             <div className="w-px h-6 bg-border-subtle" />
             <button
-              onClick={() => { setFullscreen(false); setHandControlEnabled(false); }}
+              onClick={() => setFullscreen(false)}
               className="flex items-center gap-2 px-3 py-2 rounded-xl bg-app-card hover:bg-app-hover text-fg-secondary hover:text-accent-primary text-sm font-medium border border-border-subtle transition-all"
               title="Exit fullscreen (Esc)"
             >
@@ -758,6 +876,8 @@ function App() {
                     onDeleteFile={handleDeleteFile}
                     analyzing={analyzing}
                     onCursorChange={(line, col) => { setCursorLine(line); setCursorCol(col); }}
+                    onLineSelect={handleLineSelect}
+                    highlightedLine={selectedNode?.line ?? null}
                     onRunCode={handleRunCode}
                     executionLogs={executionLogs}
                     executionResult={executionResult}
@@ -854,16 +974,80 @@ function App() {
                   flowProgress={flowProgress}
                   theme={theme}
                   focusNodeId={jarvisHighlightId ?? selectedNodeId}
-                  onZoomIn={() => {}}
-                  onZoomOut={() => {}}
-                  onResetView={() => {}}
+                  onZoomIn={() => setZoomTrigger((t) => t + 1)}
+                  onZoomOut={() => setZoomTrigger((t) => t - 1)}
+                  onResetView={() => setResetTrigger((t) => t + 1)}
                   zoomTrigger={zoomTrigger}
                   resetTrigger={resetTrigger}
                   externalRotate={externalRotate}
                   externalZoom={externalZoom}
                   externalReset={externalReset}
-                  externalClick={externalClick}
                 />
+
+                {/* J.A.R.V.I.S. 3D Visual Targeting Reticle HUD Banner */}
+                {jarvisHighlightId && (() => {
+                  const targetNode = graph.nodes.find(n => n.id === jarvisHighlightId);
+                  if (!targetNode) return null;
+                  return (
+                    <div
+                      className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 px-4 py-2 rounded-2xl select-none animate-slide-up"
+                      style={{
+                        background: "linear-gradient(135deg, rgba(2,12,32,0.94) 0%, rgba(1,6,18,0.96) 100%)",
+                        border: "1px solid rgba(0,212,255,0.5)",
+                        boxShadow: "0 4px 24px rgba(0,212,255,0.35)",
+                        backdropFilter: "blur(20px)",
+                      }}
+                    >
+                      <div className="relative w-5 h-5 flex-shrink-0">
+                        <div className="absolute inset-0 rounded-full border border-cyan-400 animate-ping" />
+                        <div className="absolute inset-0.5 rounded-full border border-cyan-500 animate-spin" />
+                        <div className="w-2 h-2 rounded-full bg-cyan-400 absolute inset-0 m-auto" />
+                      </div>
+                      <div className="text-left">
+                        <div className="text-[10px] font-mono tracking-widest text-cyan-300 font-bold flex items-center gap-2">
+                          <span>J.A.R.V.I.S. 3D TARGETING</span>
+                          <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-normal">
+                            {targetNode.kind.toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-100 font-semibold flex items-center gap-2">
+                          <span>{targetNode.label}</span>
+                          <span className="text-[10px] text-slate-400 font-normal">
+                            ({targetNode.file.split("/").pop()}:{targetNode.line})
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setJarvisHighlightId(null)}
+                        className="ml-2 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                        title="Dismiss target"
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                  );
+                })()}
+
+                {/* Confirmed Hand Gesture Notification Banner */}
+                {lastConfirmedGesture && (
+                  <div
+                    className="absolute top-16 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2.5 px-4 py-1.5 rounded-full select-none animate-slide-up pointer-events-none"
+                    style={{
+                      background: "linear-gradient(135deg, rgba(2,12,32,0.94) 0%, rgba(1,6,18,0.98) 100%)",
+                      border: "1px solid rgba(0,212,255,0.45)",
+                      boxShadow: "0 0 20px rgba(0,212,255,0.3)",
+                      backdropFilter: "blur(20px)",
+                    }}
+                  >
+                    <Sparkles size={13} className="text-cyan-400 animate-spin" />
+                    <span className="text-[10px] font-mono font-bold text-cyan-300 tracking-wider">
+                      GESTURE COMMAND //
+                    </span>
+                    <span className="text-[10px] font-mono text-white font-semibold">
+                      {lastConfirmedGesture.gesture}: {lastConfirmedGesture.action}
+                    </span>
+                  </div>
+                )}
 
                 {/* JARVIS Oracle */}
                 <JarvisOracle
@@ -878,7 +1062,7 @@ function App() {
                   onStepForward={handleStepForward}
                   onStepBack={handleStepBack}
                   onZoomIn={() => setZoomTrigger((t) => t + 1)}
-                  onZoomOut={() => setZoomTrigger((t) => t + 1)}
+                  onZoomOut={() => setZoomTrigger((t) => t - 1)}
                   onResetView={() => setResetTrigger((t) => t + 1)}
                   onSelectFile={handleFileSelect}
                   onRunAnalysis={runAnalysis}
@@ -1125,13 +1309,38 @@ function App() {
         files={files}
         open={globalSearchOpen}
         onClose={() => setGlobalSearchOpen(false)}
-        onFileSelect={(idx, _line) => setActiveFile(idx)}
+        onFileSelect={(idx, line) => {
+          setActiveFile(idx);
+          if (line) setCursorLine(line);
+        }}
       />
 
       {/* Global High-Speed Hand Gesture Control */}
       <HandGestureControl
         enabled={handControlEnabled}
         onToggle={() => setHandControlEnabled((v) => !v)}
+        onResetView={() => {
+          setExternalReset(Date.now());
+          setResetTrigger((t) => t + 1);
+        }}
+        onAction={(action) => {
+          if (action === "run_code") handleRunCode();
+          else if (action === "pause_flow") handlePause();
+          else if (action === "play_flow") handlePlay();
+          else if (action === "step_forward") handleStepForward();
+          else if (action === "step_back") handleStepBack();
+        }}
+        onNodeClickAt={(screenX, screenY) => {
+          const el = document.elementFromPoint(screenX, screenY);
+          if (el) {
+            const clickEv = new MouseEvent("click", {
+              clientX: screenX,
+              clientY: screenY,
+              bubbles: true,
+            });
+            el.dispatchEvent(clickEv);
+          }
+        }}
       />
     </div>
   );
