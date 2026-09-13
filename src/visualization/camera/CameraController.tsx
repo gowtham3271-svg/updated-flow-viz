@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useMemo } from "react";
 import { useThree, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsType } from "three-stdlib";
@@ -44,23 +44,48 @@ export function CameraController({
     isAnimating.current = true;
   }, []);
 
+  // Compute dynamic graph center and span
+  const graphCenter = useMemo(() => {
+    const c = new THREE.Vector3(0, 0, 0);
+    if (positions.size === 0) return c;
+    positions.forEach(([x, y, z]) => {
+      c.x += x;
+      c.y += y;
+      c.z += z;
+    });
+    return c.divideScalar(positions.size);
+  }, [positions]);
+
+  const graphSpan = useMemo(() => {
+    let maxDist = 8;
+    positions.forEach(([x, y, z]) => {
+      const d = Math.hypot(x - graphCenter.x, y - graphCenter.y, z - graphCenter.z);
+      if (d > maxDist) maxDist = d;
+    });
+    return Math.max(12, maxDist * 1.55);
+  }, [positions, graphCenter]);
+
   // 1. Focus on selected node
   useEffect(() => {
     if (!focusNodeId) return;
     const pos = positions.get(focusNodeId);
     if (!pos) return;
 
+    camera.up.set(0, 1, 0);
     const nodeTarget = new THREE.Vector3(...pos);
     // Position camera slightly elevated in front of node
     const nodeCamPos = nodeTarget.clone().add(new THREE.Vector3(0, 2.5, 7.5));
     animateTo(nodeCamPos, nodeTarget);
-  }, [focusNodeId, positions, animateTo]);
+  }, [focusNodeId, positions, camera, animateTo]);
 
   // 2. Reset view to standard architectural perspective
   useEffect(() => {
     if (resetTrigger === 0) return;
-    animateTo(DEFAULT_CAMERA_POS, DEFAULT_TARGET);
-  }, [resetTrigger, animateTo]);
+    camera.up.set(0, 1, 0);
+    const c = graphCenter.clone();
+    const span = graphSpan;
+    animateTo(new THREE.Vector3(c.x, c.y + span * 0.65, c.z + span * 1.35), c);
+  }, [resetTrigger, graphCenter, graphSpan, camera, animateTo]);
 
   // 3. Zoom triggers
   useEffect(() => {
@@ -69,24 +94,34 @@ export function CameraController({
     camera.getWorldDirection(dir);
     const step = zoomTrigger > 0 ? 3.0 : -3.0;
     const newPos = camera.position.clone().addScaledVector(dir, step);
-    const target = controlsRef.current?.target ?? DEFAULT_TARGET;
+    const target = controlsRef.current?.target ?? graphCenter;
     animateTo(newPos, target);
-  }, [zoomTrigger, camera, controlsRef, animateTo]);
+  }, [zoomTrigger, camera, controlsRef, graphCenter, animateTo]);
 
   // 4. Camera Presets (Isometric, Top, Front, Default)
   useEffect(() => {
     if (!preset) return;
 
+    const c = graphCenter.clone();
+    const span = graphSpan;
+
     if (preset === "top") {
-      animateTo(new THREE.Vector3(0, 28, 0.1), new THREE.Vector3(0, 0, 0));
+      // Top-Down: camera looking directly down along Y, up vector pointing towards negative Z to prevent gimbal lock
+      camera.up.set(0, 0, -1);
+      animateTo(new THREE.Vector3(c.x, c.y + span * 1.5, c.z + 0.02), c);
     } else if (preset === "isometric") {
-      animateTo(new THREE.Vector3(18, 16, 18), new THREE.Vector3(0, 0, 0));
+      // Isometric: 45° azimuth, 35.26° elevation
+      camera.up.set(0, 1, 0);
+      animateTo(new THREE.Vector3(c.x + span * 1.15, c.y + span * 0.95, c.z + span * 1.15), c);
     } else if (preset === "front") {
-      animateTo(new THREE.Vector3(0, 2, 24), new THREE.Vector3(0, 0, 0));
+      // Front Elevation
+      camera.up.set(0, 1, 0);
+      animateTo(new THREE.Vector3(c.x, c.y + 1.2, c.z + span * 1.45), c);
     } else if (preset === "default") {
-      animateTo(DEFAULT_CAMERA_POS, DEFAULT_TARGET);
+      camera.up.set(0, 1, 0);
+      animateTo(new THREE.Vector3(c.x, c.y + span * 0.65, c.z + span * 1.35), c);
     }
-  }, [preset, animateTo]);
+  }, [preset, graphCenter, graphSpan, camera, animateTo]);
 
   const rotateVel = useRef({ x: 0, y: 0 });
   const zoomVel = useRef(0);

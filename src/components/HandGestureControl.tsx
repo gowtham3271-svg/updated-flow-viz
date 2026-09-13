@@ -60,6 +60,8 @@ export function HandGestureControl({
   // Tracking state refs for continuous gestures
   const lastPalmPos = useRef<{ x: number; y: number } | null>(null);
   const lastPinchDist = useRef<number | null>(null);
+  const lastTwoHandDist = useRef<number | null>(null);
+  const lastPointPos = useRef<{ x: number; y: number; time: number } | null>(null);
   const pointDwellStart = useRef<number | null>(null);
 
   // High-level UI state
@@ -290,6 +292,8 @@ export function HandGestureControl({
           // Handle Continuous Gestures (Smoothed with adaptive 1€ Filter)
           if (handCount === 1) {
             handleContinuousGestures(rawGesture.type, handsList[0]);
+          } else if (handCount >= 2) {
+            handleTwoHandGestures(handsList[0], handsList[1]);
           } else {
             resetContinuousTracking();
           }
@@ -401,10 +405,36 @@ export function HandGestureControl({
     }
   };
 
+  // Handle Two-Hand Continuous Gestures (Expanding / Contracting Zoom)
+  const handleTwoHandGestures = (hand1: HandLandmark[], hand2: HandLandmark[]) => {
+    const multiplier = sensitivityRef.current * (turboModeRef.current ? 1.6 : 1.1);
+
+    const h1 = hand1[9];
+    const h2 = hand2[9];
+    const currentDist = Math.hypot(h1.x - h2.x, h1.y - h2.y);
+
+    if (lastTwoHandDist.current !== null) {
+      // Expanding hands apart = Zoom in; bringing hands together = Zoom out
+      const delta = (currentDist - lastTwoHandDist.current) * 60 * multiplier;
+      if (Math.abs(delta) > 0.005) {
+        onZoom?.(delta);
+        gestureEvents.emit("zoom", { delta });
+      }
+    }
+    lastTwoHandDist.current = currentDist;
+    // Reset single-hand tracking states so they don't interfere
+    lastPalmPos.current = null;
+    lastPinchDist.current = null;
+    pointDwellStart.current = null;
+    hideReticle();
+  };
+
   // Handle Continuous Gestures (Rotate, Zoom, Point Dwell with 1€ Filter)
   const handleContinuousGestures = (gestureType: GestureType, landmarks: HandLandmark[]) => {
     const multiplier = sensitivityRef.current * (turboModeRef.current ? 1.4 : 1.0);
     const now = performance.now();
+    // Clear two-hand distance baseline when single hand is tracked
+    lastTwoHandDist.current = null;
 
     // 1. OPEN PALM -> Smooth Orbit Rotation (Zero jitter, zero lag)
     if (gestureType === "open_palm") {
@@ -429,16 +459,29 @@ export function HandGestureControl({
       return;
     }
 
-    // 2. PINCH -> Smooth Zoom In / Out
+    // 2. PINCH -> Smooth Zoom In / Out OR Quick Pinch-to-Click if Aiming
     if (gestureType === "pinch") {
+      // If user was just aiming at something, clicking via pinch selects that target!
+      if (lastPointPos.current && now - lastPointPos.current.time < 600) {
+        const targetX = lastPointPos.current.x;
+        const targetY = lastPointPos.current.y;
+        onNodeClickAt?.(targetX, targetY);
+        gestureEvents.emit("click", { x: targetX, y: targetY });
+        lastPointPos.current = null;
+        hideReticle();
+        return;
+      }
+
       const thumb = landmarks[4];
       const index = landmarks[8];
       const rawDist = Math.hypot(thumb.x - index.x, thumb.y - index.y);
-      const smoothDist = stabilizerRef.current.smoothPinchDist(rawDist, now);
+      const palmScale = Math.hypot(landmarks[0].x - landmarks[9].x, landmarks[0].y - landmarks[9].y);
+      const zoomMetric = rawDist * 0.5 + palmScale * 0.5;
+      const smoothDist = stabilizerRef.current.smoothPinchDist(zoomMetric, now);
 
       if (lastPinchDist.current !== null) {
-        const delta = (lastPinchDist.current - smoothDist) * 22 * multiplier;
-        if (Math.abs(delta) > 0.02) {
+        const delta = (smoothDist - lastPinchDist.current) * 45 * multiplier;
+        if (Math.abs(delta) > 0.008) {
           onZoom?.(delta);
           gestureEvents.emit("zoom", { delta });
         }
@@ -450,7 +493,7 @@ export function HandGestureControl({
       return;
     }
 
-    // 3. POINT -> Laser Reticle & Dwell Click
+    // 3. POINT -> Laser Reticle, Real-Time Node Highlighting & Click
     if (gestureType === "point") {
       const indexTip = landmarks[8];
       // Invert X for natural mirrored interaction
@@ -459,8 +502,12 @@ export function HandGestureControl({
 
       const smooth = stabilizerRef.current.smoothPoint(screenX, screenY, now);
       updateReticlePos(smooth.x, smooth.y);
+      lastPointPos.current = { x: smooth.x, y: smooth.y, time: now };
 
-      const dwellDuration = turboModeRef.current ? 320 : 480;
+      // Real-time pointer move for instant 3D/2D node highlighting
+      gestureEvents.emit("pointer_move", { x: smooth.x, y: smooth.y });
+
+      const dwellDuration = turboModeRef.current ? 300 : 420;
       if (!pointDwellStart.current) {
         pointDwellStart.current = performance.now();
         updateReticleProgress(0);
@@ -472,7 +519,7 @@ export function HandGestureControl({
         if (progress >= 1.0) {
           onNodeClickAt?.(smooth.x, smooth.y);
           gestureEvents.emit("click", { x: smooth.x, y: smooth.y });
-          pointDwellStart.current = performance.now() + 600; // Dwell debounce
+          pointDwellStart.current = performance.now() + 550; // Dwell debounce
           updateReticleProgress(0);
         }
       }
@@ -488,6 +535,7 @@ export function HandGestureControl({
   const resetContinuousTracking = () => {
     lastPalmPos.current = null;
     lastPinchDist.current = null;
+    lastTwoHandDist.current = null;
     pointDwellStart.current = null;
     hideReticle();
   };

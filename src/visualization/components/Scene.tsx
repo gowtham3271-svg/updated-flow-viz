@@ -1,5 +1,6 @@
-import { useMemo, Suspense, useRef, useState } from "react";
-import { Canvas } from "@react-three/fiber";
+import { useMemo, Suspense, useRef, useState, useEffect, useCallback } from "react";
+import { Canvas, useThree } from "@react-three/fiber";
+import * as THREE from "three";
 import { OrbitControls, Grid, Stars, Text, RoundedBox } from "@react-three/drei";
 import { EffectComposer, Bloom, Vignette } from "@react-three/postprocessing";
 import type { OrbitControls as OrbitControlsType } from "three-stdlib";
@@ -10,6 +11,7 @@ import { layoutNodes, getLayerPlatforms, type LayerDimension } from "../layouts/
 import { CameraController, type CameraPreset } from "../camera/CameraController";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Compass, Eye, Maximize2, Layers } from "lucide-react";
+import { gestureEvents } from "@/lib/gestureEvents";
 
 export interface SceneProps {
   graph: FlowGraph;
@@ -260,6 +262,13 @@ export function Scene({
                 />
               );
             })}
+
+            {/* Touchless Spatial Gesture Raycaster & Node Lock-On */}
+            <GestureRaycaster
+              positions={positions}
+              onHover={onHover}
+              onNodeClick={onNodeClick}
+            />
           </Suspense>
 
           {/* Postprocessing Bloom & Subtle Cinematic Vignette */}
@@ -275,53 +284,66 @@ export function Scene({
       </ErrorBoundary>
 
       {/* Modern 3D Camera Controls Toolbar Overlay */}
-      <div className="absolute top-4 right-4 z-10 flex items-center gap-1.5 p-1.5 rounded-xl bg-slate-900/80 backdrop-blur-md border border-slate-800 shadow-xl text-xs text-slate-300">
+      <div className="absolute top-4 right-4 z-10 flex items-center gap-1.5 p-1.5 rounded-xl bg-slate-900/85 backdrop-blur-md border border-slate-800 shadow-xl text-xs text-slate-300 select-none">
         <button
-          onClick={() => {
-            setCameraPreset("isometric");
-            setTimeout(() => setCameraPreset("default"), 100);
-          }}
-          className="px-2.5 py-1.5 rounded-lg hover:bg-slate-800 hover:text-white transition flex items-center gap-1.5"
-          title="Isometric Architectural Angle"
+          onClick={() => setCameraPreset("isometric")}
+          className={`px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 ${
+            cameraPreset === "isometric"
+              ? "bg-cyan-500/25 text-cyan-300 border border-cyan-400/60 shadow-[0_0_12px_rgba(6,182,212,0.3)] font-semibold"
+              : "hover:bg-slate-800 text-slate-300 hover:text-white"
+          }`}
+          title="Isometric Architectural Angle (45° Axonometric)"
         >
-          <Compass size={14} className="text-cyan-400" />
+          <Compass size={14} className={cameraPreset === "isometric" ? "text-cyan-300" : "text-cyan-400"} />
           <span>Isometric</span>
         </button>
         <button
-          onClick={() => {
-            setCameraPreset("top");
-            setTimeout(() => setCameraPreset("default"), 100);
-          }}
-          className="px-2.5 py-1.5 rounded-lg hover:bg-slate-800 hover:text-white transition flex items-center gap-1.5"
-          title="Top-Down Flow Map"
+          onClick={() => setCameraPreset("top")}
+          className={`px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 ${
+            cameraPreset === "top"
+              ? "bg-emerald-500/25 text-emerald-300 border border-emerald-400/60 shadow-[0_0_12px_rgba(16,185,129,0.3)] font-semibold"
+              : "hover:bg-slate-800 text-slate-300 hover:text-white"
+          }`}
+          title="Top-Down Flow Map (Floorplan View)"
         >
-          <Layers size={14} className="text-emerald-400" />
+          <Layers size={14} className={cameraPreset === "top" ? "text-emerald-300" : "text-emerald-400"} />
           <span>Top</span>
         </button>
         <button
-          onClick={() => {
-            setCameraPreset("front");
-            setTimeout(() => setCameraPreset("default"), 100);
-          }}
-          className="px-2.5 py-1.5 rounded-lg hover:bg-slate-800 hover:text-white transition flex items-center gap-1.5"
-          title="Front Elevation"
+          onClick={() => setCameraPreset("front")}
+          className={`px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 ${
+            cameraPreset === "front"
+              ? "bg-purple-500/25 text-purple-300 border border-purple-400/60 shadow-[0_0_12px_rgba(168,85,247,0.3)] font-semibold"
+              : "hover:bg-slate-800 text-slate-300 hover:text-white"
+          }`}
+          title="Front Elevation (Tier Alignment)"
         >
-          <Eye size={14} className="text-purple-400" />
+          <Eye size={14} className={cameraPreset === "front" ? "text-purple-300" : "text-purple-400"} />
           <span>Front</span>
         </button>
         <div className="w-[1px] h-4 bg-slate-700 mx-0.5" />
         <button
-          onClick={() => {
-            setCameraPreset("default");
-            setTimeout(() => setCameraPreset("default"), 100);
-          }}
-          className="px-2.5 py-1.5 rounded-lg hover:bg-slate-800 hover:text-white transition flex items-center gap-1.5"
-          title="Reset Camera View"
+          onClick={() => setCameraPreset("default")}
+          className={`px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 ${
+            cameraPreset === "default"
+              ? "bg-amber-500/25 text-amber-300 border border-amber-400/60 shadow-[0_0_12px_rgba(245,158,11,0.3)] font-semibold"
+              : "hover:bg-slate-800 text-slate-300 hover:text-white"
+          }`}
+          title="Reset Camera / Fit All Nodes"
         >
-          <Maximize2 size={13} className="text-amber-400" />
+          <Maximize2 size={13} className={cameraPreset === "default" ? "text-amber-300" : "text-amber-400"} />
           <span>Fit All</span>
         </button>
       </div>
+
+      {/* Camera Preset Architectural Watermark Indicator */}
+      {cameraPreset !== "default" && (
+        <div className="absolute top-16 right-4 z-10 pointer-events-none px-3 py-1 rounded-md bg-slate-950/80 backdrop-blur-md border border-cyan-500/30 text-[10px] font-mono tracking-wider text-cyan-300 shadow-lg animate-fade-in">
+          {cameraPreset === "isometric" && "ISOMETRIC ANGLE // 45° AXONOMETRIC PERSPECTIVE"}
+          {cameraPreset === "top" && "TOP ELEVATION // 2D ARCHITECTURAL SCHEMATIC"}
+          {cameraPreset === "front" && "FRONT ELEVATION // CROSS-TIER ALIGNMENT"}
+        </div>
+      )}
 
       {/* Visualization Telemetry Status Badge */}
       <div className="absolute bottom-4 left-4 z-10 pointer-events-none flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-900/75 backdrop-blur-md border border-slate-800 text-[11px] text-slate-400 font-mono">
@@ -336,4 +358,74 @@ export function Scene({
       </div>
     </div>
   );
+}
+
+// Internal 3D Spatial Hit-Tester connecting Hand Gestures to 3D Nodes
+function GestureRaycaster({
+  positions,
+  onHover,
+  onNodeClick,
+}: {
+  positions: Map<string, [number, number, number]>;
+  onHover: (id: string | null) => void;
+  onNodeClick: (id: string) => void;
+}) {
+  const { camera, gl } = useThree();
+
+  const findClosestNode = useCallback(
+    (screenX: number, screenY: number, maxRadius = 80): string | null => {
+      const rect = gl.domElement.getBoundingClientRect();
+      // Allow slight 40px margin around canvas boundaries
+      if (
+        screenX < rect.left - 40 ||
+        screenX > rect.right + 40 ||
+        screenY < rect.top - 40 ||
+        screenY > rect.bottom + 40
+      ) {
+        return null;
+      }
+
+      let closestId: string | null = null;
+      let minDistance = maxRadius;
+
+      positions.forEach((pos3d, nodeId) => {
+        const v = new THREE.Vector3(...pos3d);
+        v.project(camera);
+        if (v.z > 1) return; // behind camera view
+
+        const sx = ((v.x + 1) * rect.width) / 2 + rect.left;
+        const sy = ((-v.y + 1) * rect.height) / 2 + rect.top;
+        const dist = Math.hypot(sx - screenX, sy - screenY);
+
+        if (dist < minDistance) {
+          minDistance = dist;
+          closestId = nodeId;
+        }
+      });
+
+      return closestId;
+    },
+    [camera, gl, positions]
+  );
+
+  useEffect(() => {
+    const unsubMove = gestureEvents.on("pointer_move", ({ x, y }) => {
+      const nodeId = findClosestNode(x, y, 80);
+      onHover(nodeId);
+    });
+
+    const unsubClick = gestureEvents.on("click", ({ x, y }) => {
+      const nodeId = findClosestNode(x, y, 95);
+      if (nodeId) {
+        onNodeClick(nodeId);
+      }
+    });
+
+    return () => {
+      unsubMove();
+      unsubClick();
+    };
+  }, [findClosestNode, onHover, onNodeClick]);
+
+  return null;
 }

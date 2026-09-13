@@ -245,6 +245,7 @@ function App() {
 
   const handleNodeClick = (id: string) => {
     setSelectedNodeId(id);
+    setShowDetails(true);
     const node = graph.nodes.find((n) => n.id === id);
     if (node && node.file) {
       const idx = files.findIndex((f) => f.filename === node.file || f.path === node.file);

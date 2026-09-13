@@ -5,6 +5,7 @@ export interface GestureEventMap {
   zoom: { delta: number };
   reset: boolean;
   click: { x: number; y: number };
+  pointer_move: { x: number; y: number };
   peace: boolean;
   run_code: boolean;
   play_flow: boolean;

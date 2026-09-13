@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
-import { Save, Trash2, X, FileText } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { Save, Trash2, X, FileText, CheckCircle2, AlertCircle } from "lucide-react";
+import { fetchProjects, saveProject as persistProject, deleteProject as removeProject } from "@/services/projectsService";
 import type { SavedProject, CodeFile, FlowGraph, Annotation } from "@/types";
 
 interface ProjectPanelProps {
@@ -17,43 +17,48 @@ export function ProjectPanel({ open, onClose, files, graph, annotations, onLoad 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState("");
+  const [statusNotice, setStatusNotice] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   useEffect(() => {
-    if (open) loadProjects();
+    if (open) {
+      setStatusNotice(null);
+      loadProjects();
+    }
   }, [open]);
 
   const loadProjects = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("flow_projects")
-      .select("*")
-      .order("updated_at", { ascending: false });
-    if (!error && data) setProjects(data as SavedProject[]);
+    const res = await fetchProjects();
+    if (res.success && res.projects) {
+      setProjects(res.projects);
+    } else if (res.error) {
+      console.warn("[ProjectPanel] Notice:", res.error);
+    }
     setLoading(false);
   };
 
   const saveProject = async () => {
     if (!name.trim()) return;
     setSaving(true);
-    const { data, error } = await supabase
-      .from("flow_projects")
-      .insert({
-        name: name.trim(),
-        files,
-        graph,
-        annotations,
-      })
-      .select()
-      .single();
-    if (!error && data) {
+    setStatusNotice(null);
+    const res = await persistProject({
+      name: name.trim(),
+      files,
+      graph,
+      annotations,
+    });
+    if (res.success && res.project) {
       setName("");
+      setStatusNotice({ type: "success", message: `Project "${res.project.name}" saved successfully!` });
       await loadProjects();
+    } else {
+      setStatusNotice({ type: "error", message: res.error || "Could not save project to database." });
     }
     setSaving(false);
   };
 
   const deleteProject = async (id: string) => {
-    await supabase.from("flow_projects").delete().eq("id", id);
+    await removeProject(id);
     await loadProjects();
   };
 
@@ -89,6 +94,18 @@ export function ProjectPanel({ open, onClose, files, graph, annotations, onLoad 
               <Save size={16} /> Save
             </button>
           </div>
+          {statusNotice && (
+            <div
+              className={`mt-3 px-3 py-2 rounded-lg text-xs flex items-center gap-2 ${
+                statusNotice.type === "success"
+                  ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                  : "bg-red-500/10 text-red-400 border border-red-500/20"
+              }`}
+            >
+              {statusNotice.type === "success" ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}
+              <span>{statusNotice.message}</span>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-3">

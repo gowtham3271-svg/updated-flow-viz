@@ -61,6 +61,6 @@ export const GESTURE_CONFIGS: Record<GestureType, GestureColorConfig> = {
   fist:        { primary: "#a855f7", secondary: "rgba(168,85,247,0.4)", name: "FIST",        action: "PAUSE / CANCEL" },
   swipe_left:  { primary: "#38bdf8", secondary: "rgba(56,189,248,0.4)", name: "SWIPE LEFT",  action: "PREVIOUS STEP" },
   swipe_right: { primary: "#38bdf8", secondary: "rgba(56,189,248,0.4)", name: "SWIPE RIGHT", action: "NEXT STEP" },
-  two_hands:   { primary: "#818cf8", secondary: "rgba(129,140,248,0.4)", name: "DUAL HANDS",  action: "RECALIBRATE" },
+  two_hands:   { primary: "#818cf8", secondary: "rgba(129,140,248,0.4)", name: "DUAL HANDS",  action: "ZOOM IN / OUT" },
   none:        { primary: "#64748b", secondary: "rgba(100,116,139,0.2)", name: "SCANNING",   action: "LISTENING" },
 };
